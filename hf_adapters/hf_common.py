@@ -410,10 +410,11 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
     # Initialize empty KV caches
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
-    head_dim = getattr(model, "_spyre_head_dim", getattr(
-        model.config, "head_dim",
-        model.config.hidden_size // model.config.num_attention_heads,
-    ))
+    head_dim = (
+        getattr(model, "_spyre_head_dim", None)
+        or getattr(model.config, "head_dim", None)
+        or model.config.hidden_size // model.config.num_attention_heads
+    )
     key_caches = [
         torch.empty(batch_size, num_kv_heads, 0, head_dim,
                      dtype=torch.float16, device=DEVICE)
@@ -563,3 +564,110 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
         results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Standard GQA adapter helpers
+# ---------------------------------------------------------------------------
+
+
+def make_standard_gqa_block(layer):
+    """Compiled block for standard GQA models (separate QKV, no multipliers).
+
+    Shared by Llama, Qwen2, Mistral, and other standard GQA adapters.
+    """
+    attn = layer.self_attn
+    mlp = layer.mlp
+    input_ln = layer.input_layernorm
+    post_attn_ln = layer.post_attention_layernorm
+
+    def block_forward(hidden_states, selected_freqs, attn_mask,
+                      key_cache, value_cache,
+                      is_filling, token_index, cache_position):
+        residual = hidden_states
+        h = input_ln(hidden_states)
+
+        bsz, seq_len, _ = h.shape
+        q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+        k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+        v = attn.v_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+
+        q = apply_rope_matmul(q, selected_freqs)
+        k = apply_rope_matmul(k, selected_freqs)
+
+        key_cache, value_cache = kv_cache_update(
+            k, v, key_cache, value_cache,
+            is_filling, token_index, cache_position,
+        )
+
+        attn_out = F.scaled_dot_product_attention(
+            q, key_cache, value_cache,
+            attn_mask=attn_mask, dropout_p=0.0, scale=attn.scaling, enable_gqa=True,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = attn.o_proj(attn_out)
+
+        h = residual + attn_out
+
+        residual = h
+        h = post_attn_ln(h)
+        h = mlp(h)
+        h = residual + h
+
+        return h, key_cache, value_cache
+
+    return torch.compile(block_forward, dynamic=False)
+
+
+def standard_gqa_forward(model, input_ids, position_ids, attn_mask,
+                         key_caches, value_caches,
+                         is_filling, token_index, cache_position):
+    """Standard GQA forward: embedding, RoPE, compiled blocks, norm, LM head."""
+    h = model.model.embed_tokens(input_ids)
+
+    selected_freqs = model._spyre_rope(h, position_ids)
+
+    for i, compiled_block in enumerate(model._spyre_compiled_blocks):
+        h, key_caches[i], value_caches[i] = compiled_block(
+            h, selected_freqs, attn_mask,
+            key_caches[i], value_caches[i],
+            is_filling, token_index, cache_position,
+        )
+
+    h = model.model.norm(h)
+    logits = model.lm_head(h)
+    return logits
+
+
+def prepare_standard_gqa(model, rmsnorm_cls):
+    """Apply Spyre adaptations for standard GQA models in-place.
+
+    Args:
+        model: HF model (on CPU, eval mode, requires_grad=False).
+        rmsnorm_cls: The model's RMSNorm class to patch.
+    """
+    cfg = model.config
+    orig_head_dim = (
+        getattr(cfg, "head_dim", None)
+        or cfg.hidden_size // cfg.num_attention_heads
+    )
+
+    padded_head_dim = None
+    stick_aligned_head_dim = (
+        ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
+    )
+    if stick_aligned_head_dim > orig_head_dim:
+        padded_head_dim = stick_aligned_head_dim
+        pad_attention_heads(
+            model, model.model.layers, orig_head_dim, padded_head_dim,
+            cfg.num_attention_heads, cfg.num_key_value_heads,
+        )
+
+    model._spyre_rope = PrecomputedRotaryEmbedding(
+        model.model.rotary_emb, padded_head_dim=padded_head_dim,
+    )
+    patch_rmsnorm(rmsnorm_cls)
+    pad_lm_head(model)
+    model._spyre_compiled_blocks = [
+        make_standard_gqa_block(layer) for layer in model.model.layers
+    ]

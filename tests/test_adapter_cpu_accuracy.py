@@ -131,10 +131,11 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
-    head_dim = getattr(model, "_spyre_head_dim", getattr(
-        model.config, "head_dim",
-        model.config.hidden_size // model.config.num_attention_heads,
-    ))
+    head_dim = (
+        getattr(model, "_spyre_head_dim", None)
+        or getattr(model.config, "head_dim", None)
+        or model.config.hidden_size // model.config.num_attention_heads
+    )
     vocab_size = model.config.vocab_size
 
     # Match model dtype for KV caches and masks
@@ -339,6 +340,16 @@ MODELS = {
         "name": "Phi-4 mini",
         "path": "microsoft/Phi-4-mini-instruct",
         "adapter": "hf_phi3.py",
+    },
+    "qwen2": {
+        "name": "Qwen2.5 1.5B",
+        "path": "Qwen/Qwen2.5-1.5B",
+        "adapter": "hf_qwen2.py",
+    },
+    "mistral": {
+        "name": "Mistral 7B v0.3",
+        "path": "mistralai/Mistral-7B-v0.3",
+        "adapter": "hf_mistral.py",
     },
 }
 

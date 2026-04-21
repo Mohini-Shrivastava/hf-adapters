@@ -14,6 +14,9 @@ which models are supported on Spyre hardware.
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Llama 3.2 3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | TinyLlama 1.1B | llama | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
+| Qwen2.5 7B | qwen2 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Qwen2.5 1.5B | qwen2 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Mistral 7B v0.3 | mistral | 128 | 64 | Yes | Yes | Yes | Yes |
 | Phi-4 mini | phi3 | 128 | 64 | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
@@ -45,6 +48,14 @@ model = load_model("HuggingFaceTB/SmolLM3-3B-Base")
 # Llama (covers Llama 1/2/3, Code Llama, Yi, TinyLlama)
 from hf_adapters.hf_llama import load_model, generate
 model = load_model("meta-llama/Llama-3.2-3B")
+
+# Qwen2 (covers Qwen 1.5, Qwen 2, Qwen 2.5)
+from hf_adapters.hf_qwen2 import load_model, generate
+model = load_model("Qwen/Qwen2.5-7B")
+
+# Mistral
+from hf_adapters.hf_mistral import load_model, generate
+model = load_model("mistralai/Mistral-7B-v0.3")
 
 # Phi-4 mini
 from hf_adapters.hf_phi3 import load_model, generate
@@ -99,6 +110,8 @@ hf_adapters/
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
 ├── hf_llama.py            — Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
+├── hf_qwen2.py            — Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
+├── hf_mistral.py          — Mistral adapter (Mistral 7B v0.2, v0.3)
 ├── hf_phi3.py             — Phi-4 mini adapter
 └── __init__.py
 ```

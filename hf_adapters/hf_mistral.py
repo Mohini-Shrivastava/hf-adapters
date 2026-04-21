@@ -13,18 +13,18 @@
 # limitations under the License.
 
 """
-HuggingFace Transformers adapter for Llama models on Spyre.
+HuggingFace Transformers adapter for Mistral models on Spyre.
 
-Covers model_type ``llama``: Llama 1/2/3, Code Llama, Yi, and other
-models that register as ``llama`` in HF Transformers.
+Covers model_type ``mistral``: Mistral 7B v0.2 and v0.3.
+Same architecture as Llama with GQA.
 
 Usage::
 
-    from hf_adapters.hf_llama import load_model, generate
+    from hf_adapters.hf_mistral import load_model, generate
     from transformers import AutoTokenizer
 
-    model = load_model("meta-llama/Llama-3.2-3B")
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
+    model = load_model("mistralai/Mistral-7B-v0.3")
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.3")
     outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
@@ -41,16 +41,16 @@ _run_forward = standard_gqa_forward
 
 
 def prepare_for_spyre(model):
-    """Apply Spyre adaptations to Llama model in-place."""
-    from transformers.models.llama.modeling_llama import LlamaRMSNorm
-    prepare_standard_gqa(model, LlamaRMSNorm)
+    """Apply Spyre adaptations to Mistral model in-place."""
+    from transformers.models.mistral.modeling_mistral import MistralRMSNorm
+    prepare_standard_gqa(model, MistralRMSNorm)
 
 
 def load_model(model_path, dtype=torch.float16):
-    """Load Llama model for Spyre."""
+    """Load Mistral model for Spyre."""
     return load_model_common(model_path, prepare_for_spyre, dtype)
 
 
 def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Llama on Spyre."""
+    """Generate text with Mistral on Spyre."""
     return _generate(standard_gqa_forward, model, tokenizer, prompts, **kwargs)

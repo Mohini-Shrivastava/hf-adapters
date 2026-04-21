@@ -19,6 +19,8 @@ from `transformers`.
 | SmolLM3 (3B) | `hf_smollm3.py` | Compiles and runs on Spyre |
 | Llama 3.2 (3B) | `hf_llama.py` | Compiles and runs on Spyre |
 | TinyLlama (1.1B) | `hf_llama.py` | Compiles and runs on Spyre (head-dim padded) |
+| Qwen2.5 (0.5B-7B) | `hf_qwen2.py` | Compiles and runs on Spyre |
+| Mistral 7B (v0.2, v0.3) | `hf_mistral.py` | Compiles and runs on Spyre |
 | Phi-4 mini | `hf_phi3.py` | Blocked on Spyre (sub-stick `head_dim`) |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full compatibility
@@ -38,7 +40,7 @@ print(outputs[0])
 ```
 
 Replace `hf_granite` with `hf_qwen3`, `hf_granitemoehybrid`, `hf_smollm3`,
-`hf_llama`, or `hf_phi3` for other model families.
+`hf_llama`, `hf_qwen2`, `hf_mistral`, or `hf_phi3` for other model families.
 
 ## Repo Structure
 
@@ -56,6 +58,8 @@ hf_adapters/
 ├── hf_granitemoehybrid.py     Granite 4.0 dense adapter
 ├── hf_smollm3.py              SmolLM3 adapter
 ├── hf_llama.py                Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
+├── hf_qwen2.py                Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
+├── hf_mistral.py              Mistral adapter (Mistral 7B v0.2, v0.3)
 ├── hf_phi3.py                 Phi-4 mini adapter
 └── __init__.py
 
@@ -97,6 +101,8 @@ python tests/test_adapter_cpu_accuracy.py granite
 python tests/test_adapter_cpu_accuracy.py granite4
 python tests/test_adapter_cpu_accuracy.py smollm3
 python tests/test_adapter_cpu_accuracy.py llama
+python tests/test_adapter_cpu_accuracy.py qwen2
+python tests/test_adapter_cpu_accuracy.py mistral
 ```
 
 This downloads model weights from HuggingFace Hub on first run. The test
@@ -123,6 +129,8 @@ python tests/test_block_cpu_vs_spyre.py granite
 python tests/test_block_cpu_vs_spyre.py granite4
 python tests/test_block_cpu_vs_spyre.py smollm3
 python tests/test_block_cpu_vs_spyre.py llama
+python tests/test_block_cpu_vs_spyre.py qwen2
+python tests/test_block_cpu_vs_spyre.py mistral
 ```
 
 **E2E smoke test** — loads a real model onto Spyre, generates tokens,
@@ -134,6 +142,8 @@ python tests/test_e2e_smoke_spyre.py granite
 python tests/test_e2e_smoke_spyre.py granite4
 python tests/test_e2e_smoke_spyre.py smollm3
 python tests/test_e2e_smoke_spyre.py llama
+python tests/test_e2e_smoke_spyre.py qwen2
+python tests/test_e2e_smoke_spyre.py mistral
 ```
 
 **E2E token comparison** — runs stock HF on CPU and the adapter on Spyre
@@ -143,6 +153,8 @@ side-by-side, comparing greedy tokens at each step:
 python tests/test_e2e_token_compare_spyre.py qwen3
 python tests/test_e2e_token_compare_spyre.py granite
 python tests/test_e2e_token_compare_spyre.py llama
+python tests/test_e2e_token_compare_spyre.py qwen2
+python tests/test_e2e_token_compare_spyre.py mistral
 ```
 
 Note: Spyre has known numerical accuracy limitations being addressed in

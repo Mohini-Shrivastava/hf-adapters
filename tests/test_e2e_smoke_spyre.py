@@ -67,6 +67,16 @@ MODEL_REGISTRY = {
         "path": "microsoft/Phi-4-mini-instruct",
         "adapter": "hf_adapters.hf_phi3",
     },
+    "qwen2": {
+        "name": "Qwen2.5 1.5B",
+        "path": "Qwen/Qwen2.5-1.5B",
+        "adapter": "hf_adapters.hf_qwen2",
+    },
+    "mistral": {
+        "name": "Mistral 7B v0.3",
+        "path": "mistralai/Mistral-7B-v0.3",
+        "adapter": "hf_adapters.hf_mistral",
+    },
 }
 
 

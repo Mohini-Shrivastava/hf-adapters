@@ -142,6 +142,38 @@ def _make_llama_config():
     return cfg
 
 
+def _make_qwen2_config():
+    from transformers import AutoConfig
+    try:
+        cfg = AutoConfig.from_pretrained("Qwen/Qwen2.5-7B")
+    except Exception:
+        from transformers import Qwen2Config
+        cfg = Qwen2Config(
+            hidden_size=3584, num_attention_heads=28, num_key_value_heads=4,
+            intermediate_size=18944, num_hidden_layers=3, vocab_size=152064,
+            rms_norm_eps=1e-6, max_position_embeddings=4096,
+        )
+    cfg.num_hidden_layers = 3
+    cfg._attn_implementation = "eager"
+    return cfg
+
+
+def _make_mistral_config():
+    from transformers import AutoConfig
+    try:
+        cfg = AutoConfig.from_pretrained("mistralai/Mistral-7B-v0.3")
+    except Exception:
+        from transformers import MistralConfig
+        cfg = MistralConfig(
+            hidden_size=4096, num_attention_heads=32, num_key_value_heads=8,
+            intermediate_size=14336, num_hidden_layers=3, vocab_size=32768,
+            rms_norm_eps=1e-5, max_position_embeddings=4096,
+        )
+    cfg.num_hidden_layers = 3
+    cfg._attn_implementation = "eager"
+    return cfg
+
+
 MODEL_REGISTRY = {
     "qwen3": {
         "name": "Qwen3 0.6B",
@@ -168,6 +200,16 @@ MODEL_REGISTRY = {
         "config_fn": _make_llama_config,
         "adapter": "hf_adapters.hf_llama",
     },
+    "qwen2": {
+        "name": "Qwen2.5 7B",
+        "config_fn": _make_qwen2_config,
+        "adapter": "hf_adapters.hf_qwen2",
+    },
+    "mistral": {
+        "name": "Mistral 7B",
+        "config_fn": _make_mistral_config,
+        "adapter": "hf_adapters.hf_mistral",
+    },
 }
 
 
@@ -189,8 +231,9 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu"):
     """
     torch.manual_seed(seed)
     H = config.hidden_size
-    head_dim = getattr(
-        config, "head_dim", H // config.num_attention_heads
+    head_dim = (
+        getattr(config, "head_dim", None)
+        or H // config.num_attention_heads
     )
     num_kv_heads = config.num_key_value_heads
     half_dim = head_dim // 2

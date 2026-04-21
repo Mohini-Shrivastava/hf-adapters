@@ -54,6 +54,16 @@ MODEL_REGISTRY = {
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_adapters.hf_llama",
     },
+    "qwen2": {
+        "name": "Qwen2.5 1.5B",
+        "path": "Qwen/Qwen2.5-1.5B",
+        "adapter": "hf_adapters.hf_qwen2",
+    },
+    "mistral": {
+        "name": "Mistral 7B v0.3",
+        "path": "mistralai/Mistral-7B-v0.3",
+        "adapter": "hf_adapters.hf_mistral",
+    },
 }
 
 
@@ -102,9 +112,9 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
-    head_dim = getattr(
-        model.config, "head_dim",
-        model.config.hidden_size // model.config.num_attention_heads,
+    head_dim = (
+        getattr(model.config, "head_dim", None)
+        or model.config.hidden_size // model.config.num_attention_heads
     )
     vocab_size = model.config.vocab_size
 
