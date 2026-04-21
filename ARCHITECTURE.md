@@ -9,7 +9,7 @@ which models are supported on Spyre hardware.
 |-------|-----------|---------|-----|--------------|-------------|---------------|-----------|
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 8B | granite | 128 | 64 | Yes | Yes | Yes | Yes |
-| Granite 3.3 2B | granite | 64 | 32 | **No** | Yes | **No** | — |
+| Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 4.0 1B | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Phi-4 mini | phi3 | 96 | 48 | **No** | Untested | **No** (sub-stick) | — |
@@ -85,9 +85,9 @@ hf_adapters/
 ├── hf_common.py          — shared utilities
 │   DEVICE, BLOCK_SIZE,
 │   PrecomputedRotaryEmbedding, apply_rope_matmul,
-│   patch_rmsnorm, pad_lm_head, kv_cache_update,
-│   build_prefill_mask, build_expansion_mask,
-│   load_model_common, generate
+│   pad_attention_heads, patch_rmsnorm, pad_lm_head,
+│   kv_cache_update, build_prefill_mask,
+│   build_expansion_mask, load_model_common, generate
 ├── hf_granite.py          — Granite 3.3 adapter
 ├── hf_qwen3.py            — Qwen3 adapter
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
@@ -235,6 +235,23 @@ each piece within the limit.
 **Why:** Fused weight splits hit stickify non-zero offset
 assertions. Separate linears trace cleanly in `torch.compile`.
 
+#### 11. Head-Dim Padding: Sub-Stick Models (Granite 3.3 2B)
+
+| | HF Transformers | Adapter |
+|---|---|---|
+| **head_dim** | 64 (native) | Padded to 128 via `pad_attention_heads()` |
+| **Q/K projections** | `[num_heads * 64, hidden]` | `[num_heads * 128, hidden]` with interleaved zero-padding per RoPE [2, D/2] group |
+| **V projection** | `[num_kv_heads * 64, hidden]` | `[num_kv_heads * 128, hidden]` with simple end-padding per head |
+| **O projection** | `[hidden, num_heads * 64]` | `[hidden, num_heads * 128]` with simple end-padding per head |
+| **RoPE freqs** | `[S, 2, 2, 32]` | `[S, 2, 2, 64]` with identity padding (via `padded_head_dim` on `PrecomputedRotaryEmbedding`) |
+| **Scaling** | `1/sqrt(64)` | Preserved (zero-padded dims don't contribute to dot product) |
+
+**Why:** The RoPE matmul reshapes Q/K to `[B, L, H, 2, D/2]`. When
+`D/2 < 64`, Spyre's stickify pass fails. Padding head_dim to 128
+makes `D/2 = 64` (one stick). Q/K use interleaved padding so each
+RoPE half-group is padded separately; V/O use simple end-padding
+since they don't pass through the `[2, D/2]` reshape.
+
 ### What Works As-Is (No Patching)
 
 These HF Transformer components run natively on Spyre without
@@ -264,13 +281,16 @@ modification:
 | NoPE layers | No | No | No | Yes (conditional RoPE) | No |
 | Partial RoPE | No | No | No | No | Yes (identity-padded freqs) |
 | Chunked LM head | No | No | No | No | Yes (8 chunks, 200K+ vocab) |
+| Head-dim padding | 2B: Yes (64→128) | No | No | No | No |
 | Attention scaling | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` |
 
 ## Adding a New Model
 
 ### Checklist
 
-1. Check `head_dim >= 128` (see Stick Alignment below)
+1. Check `head_dim` — if `head_dim/2 < 64` with RoPE (or
+   `head_dim < 64` without), use `pad_attention_heads()` to pad
+   to the required size (see Stick Alignment below)
 2. Check for fused weights that need splitting (QKV like Phi-4's
    `qkv_proj`, MLP like Granite 4.0's `input_linear` or Phi-4's
    `gate_up_proj`)
@@ -300,6 +320,7 @@ modification:
 | Partial RoPE | Not supported | Identity-padded rotation matrices (`PartialPrecomputedRotaryEmbedding`) |
 | Fused weights | N/A | Split at prepare time (QKV, gate+up) |
 | Large vocab | N/A | Chunked LM head (8 chunks) |
+| Sub-stick head_dim | Not supported | `pad_attention_heads()` zero-pads Q/K/V/O and RoPE freqs |
 | Maintenance | Requires FMS fork | No fork; runtime monkey-patches on stock HF |
 
 ## Stick Alignment Requirement
@@ -314,12 +335,14 @@ AssertionError: Could not find a host dimension matching stick
 expr d4 in [0, d0, 64*d1 + 32*d3 + d4]
 ```
 
-**Rule: a model works on Spyre if `head_dim >= 128`
-(i.e. `D/2 >= 64`).**
+**Rule: the RoPE matmul requires `head_dim >= 128`
+(i.e. `D/2 >= 64`).** Models with smaller `head_dim` can use
+`pad_attention_heads()` to zero-pad Q/K/V/O projections and RoPE
+frequencies to the required size.
 
-All models tested with `head_dim=128` compile and run. Granite 3.3
-2B (`head_dim=64`) and Phi-4 mini (`head_dim=96`) are both sub-stick
-failures.
+Granite 3.3 2B (`head_dim=64`) is padded to 128 automatically.
+Phi-4 mini (`head_dim=96`) could use the same approach but is
+untested.
 
 Note that `head_dim` is not always
 `hidden_size // num_attention_heads`. Some models (e.g. Qwen3)
@@ -347,7 +370,7 @@ will_compile = (head_dim // 2) >= 64
 | No `sin`/`cos` ops | RoPE must be precomputed | `PrecomputedRotaryEmbedding` |
 | No dtype conversion | RMSNorm must stay fp16 | Patched forward with device check |
 | No `aten.slice` in compiled graphs | KV cache indexing falls back to CPU | `spyre.overwrite` for fill mode |
-| `head_dim/2 < 64` (sub-stick) | Stickify assertion on RoPE matmul | Only use models with `head_dim >= 128` |
+| `head_dim/2 < 64` (sub-stick) | Stickify assertion on RoPE matmul | `pad_attention_heads()` pads Q/K/V/O projections and RoPE freqs to stick-aligned size (e.g. Granite 3.3 2B: 64→128) |
 | `partial_rotary_factor < 1.0` | Non-zero offset assertion in stickify | Identity-padded rotation matrices in `PartialPrecomputedRotaryEmbedding` (implemented in `hf_phi3.py`; Phi-4 still blocked by sub-stick `head_dim`) |
 | Zero-length tensors crash `copy_host_to_device` | Segfault on `.to("spyre")` | Create empty tensors directly on device |
 | fp16 overflow on CPU for large multipliers | NaN logits on CPU | Test in float32; runs fine on Spyre hardware |
@@ -379,14 +402,11 @@ steps, this causes 63 recompilations on first use.
    call
 3. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)
-4. **Phi-4 mini** — adapter code complete (`hf_phi3.py`) with
-   identity-padded partial RoPE, split fused QKV/MLP, and chunked
-   LM head. Partial rotary factor is solved. Still blocked on Spyre
-   by sub-stick `head_dim=96` (`D/2=48 < 64`). Needs compiler fix
-   (same as item 5).
-5. **Stick alignment for small head\_dim** — Granite 3.3 2B
-   (`head_dim=64`) and Phi-4 mini (`head_dim=96`) fail stickify.
-   Needs compiler fix or alternative RoPE implementation.
+4. **Phi-4 mini on Spyre** — adapter code complete (`hf_phi3.py`)
+   with identity-padded partial RoPE, split fused QKV/MLP, and
+   chunked LM head. Sub-stick `head_dim=96` (`D/2=48 < 64`) could
+   be fixed by applying `pad_attention_heads()` (same technique
+   that fixed Granite 3.3 2B) — untested.
 
 ## Test Scripts
 

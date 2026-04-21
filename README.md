@@ -13,6 +13,7 @@ from `transformers`.
 | Model | Adapter | Status |
 |-------|---------|--------|
 | Granite 3.3 (8B) | `hf_granite.py` | Compiles and runs on Spyre |
+| Granite 3.3 (2B) | `hf_granite.py` | Compiles and runs on Spyre (head-dim padded) |
 | Qwen3 (0.6B) | `hf_qwen3.py` | Compiles and runs on Spyre |
 | Granite 4.0 (1B dense) | `hf_granitemoehybrid.py` | Compiles and runs on Spyre |
 | SmolLM3 (3B) | `hf_smollm3.py` | Compiles and runs on Spyre |
@@ -46,8 +47,8 @@ ARCHITECTURE.md                        Detailed status, architecture docs
 hf_adapters/
 ├── hf_common.py              Shared utilities: RoPE precomputation,
 │                              RMSNorm patching, LM head padding,
-│                              mask builders, KV cache helpers,
-│                              model-agnostic generate loop
+│                              head-dim padding, mask builders,
+│                              KV cache helpers, generate loop
 ├── hf_granite.py              Granite 3.3 adapter
 ├── hf_qwen3.py                Qwen3 adapter
 ├── hf_granitemoehybrid.py     Granite 4.0 dense adapter

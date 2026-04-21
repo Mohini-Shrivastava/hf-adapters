@@ -19,7 +19,7 @@ Tests prefill (full sequence) and 4 autoregressive decode steps, comparing
 logits and greedy token selections at each step.
 
 Usage:
-    python tests/test_adapter_cpu_accuracy.py [granite|qwen3|granite4|smollm3]
+    python tests/test_adapter_cpu_accuracy.py [granite|granite2b|qwen3|granite4|smollm3]
 
 Requires: transformers, torch (2.x), sentencepiece
 """
@@ -131,10 +131,10 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
-    head_dim = getattr(
+    head_dim = getattr(model, "_spyre_head_dim", getattr(
         model.config, "head_dim",
         model.config.hidden_size // model.config.num_attention_heads,
-    )
+    ))
     vocab_size = model.config.vocab_size
 
     # Match model dtype for KV caches and masks
@@ -309,6 +309,11 @@ MODELS = {
         "adapter": "hf_qwen3.py",
     },
     "granite": {
+        "name": "Granite 3.3 8B",
+        "path": "ibm-granite/granite-3.3-8b-instruct",
+        "adapter": "hf_granite.py",
+    },
+    "granite2b": {
         "name": "Granite 3.3 2B",
         "path": "ibm-granite/granite-3.3-2b-instruct",
         "adapter": "hf_granite.py",

@@ -44,11 +44,17 @@ class PrecomputedRotaryEmbedding(nn.Module):
     Returns ``selected_freqs`` [B, L, 2, 2, D/2] on Spyre, indexed by
     position_ids.  The companion ``apply_rope_matmul`` applies the rotation
     without any tensor slicing.
+
+    When ``padded_head_dim`` is set (larger than the native rope dim),
+    the rotation matrix is padded with identity entries so that
+    ``apply_rope_matmul`` on the full padded head_dim passes through
+    non-rotated dimensions unchanged.
     """
 
-    def __init__(self, original_rope: nn.Module):
+    def __init__(self, original_rope: nn.Module, padded_head_dim: Optional[int] = None):
         super().__init__()
         self.original = original_rope
+        self.padded_head_dim = padded_head_dim
         self._freq_cache: Optional[torch.Tensor] = None
         self._cached_len = 0
 
@@ -57,10 +63,11 @@ class PrecomputedRotaryEmbedding(nn.Module):
             return
         target_len = max(max_len, self._cached_len * 2, 2048)
         inv_freq = self.original.inv_freq.to("cpu").float()
+        rope_half = inv_freq.shape[0]
         t = torch.arange(target_len, dtype=inv_freq.dtype)
-        freqs = torch.outer(t, inv_freq).float()  # [S, D/2]
+        freqs = torch.outer(t, inv_freq).float()  # [S, rope_half]
         scaling = getattr(self.original, "attention_scaling", 1.0)
-        self._freq_cache = torch.stack(
+        rot = torch.stack(
             [
                 torch.cos(freqs) * scaling,
                 -torch.sin(freqs) * scaling,
@@ -68,7 +75,18 @@ class PrecomputedRotaryEmbedding(nn.Module):
                 torch.cos(freqs) * scaling,
             ],
             dim=1,
-        ).view(target_len, 2, 2, freqs.shape[1]).contiguous().to(torch.float16)
+        ).view(target_len, 2, 2, rope_half)
+
+        if self.padded_head_dim is not None:
+            padded_half = self.padded_head_dim // 2
+            if padded_half > rope_half:
+                pad_half = padded_half - rope_half
+                ident = torch.zeros(target_len, 2, 2, pad_half)
+                ident[:, 0, 0, :] = 1.0
+                ident[:, 1, 1, :] = 1.0
+                rot = torch.cat([rot, ident], dim=-1)
+
+        self._freq_cache = rot.contiguous().to(torch.float16)
         self._cached_len = target_len
 
     def forward(self, hidden_states, position_ids):
@@ -135,6 +153,112 @@ def kv_cache_update(k, v, key_cache, value_cache,
 # ---------------------------------------------------------------------------
 # Patches
 # ---------------------------------------------------------------------------
+
+
+def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
+                        num_heads, num_kv_heads):
+    """Zero-pad Q/K/V/O attention projections to a larger head_dim.
+
+    Q and K use interleaved padding compatible with the RoPE [2, D/2]
+    reshape: each half-group is padded separately so that
+    ``apply_rope_matmul`` sees the original data in the correct
+    positions and identity-rotates the zero-padded positions.
+
+    V and O use simple end-padding per head (they don't pass through
+    RoPE, so layout within a head doesn't matter).
+
+    Args:
+        model: HF model — stores padded dim as ``model._spyre_head_dim``.
+        layers: Iterable of decoder layers (each must have ``self_attn``).
+        orig_head_dim: Original head dimension.
+        padded_head_dim: Target head dimension (must be > orig_head_dim).
+        num_heads: Number of query heads.
+        num_kv_heads: Number of key/value heads.
+    """
+    assert orig_head_dim % 2 == 0, f"head_dim must be even, got {orig_head_dim}"
+    assert padded_head_dim % 2 == 0, f"padded head_dim must be even, got {padded_head_dim}"
+    assert padded_head_dim > orig_head_dim, (
+        f"padded_head_dim ({padded_head_dim}) must exceed orig_head_dim ({orig_head_dim})"
+    )
+    assert padded_head_dim // 2 >= BLOCK_SIZE, (
+        f"padded head_dim/2 ({padded_head_dim // 2}) must be >= BLOCK_SIZE ({BLOCK_SIZE})"
+    )
+
+    orig_half = orig_head_dim // 2
+    padded_half = padded_head_dim // 2
+
+    def _pad_qkv_rope(proj, n_heads):
+        """Interleaved padding for Q/K: pad within each [2, D/2] group."""
+        w = proj.weight
+        hidden = w.shape[1]
+        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_w[d:d + orig_half, :] = w[s:s + orig_half, :]
+            new_w[d + padded_half:d + padded_half + orig_half, :] = (
+                w[s + orig_half:s + orig_head_dim, :]
+            )
+        new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+        if proj.bias is not None:
+            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
+            for h in range(n_heads):
+                s = h * orig_head_dim
+                d = h * padded_head_dim
+                new_b[d:d + orig_half] = proj.bias[s:s + orig_half]
+                new_b[d + padded_half:d + padded_half + orig_half] = (
+                    proj.bias[s + orig_half:s + orig_head_dim]
+                )
+            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+        return new_proj
+
+    def _pad_qkv_simple(proj, n_heads):
+        """Simple end-padding per head for V."""
+        w = proj.weight
+        hidden = w.shape[1]
+        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_w[d:d + orig_head_dim, :] = w[s:s + orig_head_dim, :]
+        new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+        if proj.bias is not None:
+            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
+            for h in range(n_heads):
+                s = h * orig_head_dim
+                d = h * padded_head_dim
+                new_b[d:d + orig_head_dim] = proj.bias[s:s + orig_head_dim]
+            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+        return new_proj
+
+    def _pad_out(proj, n_heads):
+        """Simple end-padding along input dim for O."""
+        w = proj.weight
+        hidden = w.shape[0]
+        new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_w[:, d:d + orig_head_dim] = w[:, s:s + orig_head_dim]
+        new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
+        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+        if proj.bias is not None:
+            new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
+        return new_proj
+
+    for layer in layers:
+        attn = layer.self_attn
+        orig_scaling = attn.scaling
+        attn.q_proj = _pad_qkv_rope(attn.q_proj, num_heads)
+        attn.k_proj = _pad_qkv_rope(attn.k_proj, num_kv_heads)
+        attn.v_proj = _pad_qkv_simple(attn.v_proj, num_kv_heads)
+        attn.o_proj = _pad_out(attn.o_proj, num_heads)
+        attn.head_dim = padded_head_dim
+        attn.scaling = orig_scaling
+
+    model._spyre_head_dim = padded_head_dim
 
 
 def patch_rmsnorm(rmsnorm_cls):
@@ -286,10 +410,10 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
     # Initialize empty KV caches
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
-    head_dim = getattr(
+    head_dim = getattr(model, "_spyre_head_dim", getattr(
         model.config, "head_dim",
         model.config.hidden_size // model.config.num_attention_heads,
-    )
+    ))
     key_caches = [
         torch.empty(batch_size, num_kv_heads, 0, head_dim,
                      dtype=torch.float16, device=DEVICE)

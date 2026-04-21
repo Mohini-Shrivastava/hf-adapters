@@ -16,7 +16,7 @@
 E2E smoke test: load HF model on Spyre, generate tokens, verify non-trivial.
 
 Usage (on Spyre pod):
-    python3 test_e2e_smoke_spyre.py [qwen3|granite|granite4|smollm3]
+    python3 test_e2e_smoke_spyre.py [qwen3|granite|granite2b|granite4|smollm3]
 
 Verifies:
   - Model loads and moves to Spyre without error
@@ -38,6 +38,11 @@ MODEL_REGISTRY = {
         "adapter": "hf_adapters.hf_qwen3",
     },
     "granite": {
+        "name": "Granite 3.3 8B",
+        "path": "ibm-granite/granite-3.3-8b-instruct",
+        "adapter": "hf_adapters.hf_granite",
+    },
+    "granite2b": {
         "name": "Granite 3.3 2B",
         "path": "ibm-granite/granite-3.3-2b-instruct",
         "adapter": "hf_adapters.hf_granite",
