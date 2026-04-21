@@ -1,6 +1,7 @@
-# HF Adapter Spyre Status
+# Architecture
 
-Status of HuggingFace Transformers adapters on Spyre hardware.
+How the HuggingFace Transformers adapters work, what they change, and
+which models are supported on Spyre hardware.
 
 ## Model Compatibility Matrix
 
@@ -11,6 +12,7 @@ Status of HuggingFace Transformers adapters on Spyre hardware.
 | Granite 3.3 2B | granite | 64 | 32 | **No** | Yes | **No** | — |
 | Granite 4.0 1B | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Phi-4 mini | phi3 | 96 | 48 | **No** | Untested | **No** (sub-stick) | — |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
 HF on CPU.
@@ -38,6 +40,10 @@ model = load_model("ibm-granite/granite-4.0-1b-base")
 from hf_adapters.hf_smollm3 import load_model, generate
 model = load_model("HuggingFaceTB/SmolLM3-3B-Base")
 
+# Phi-4 mini (blocked on Spyre — sub-stick head_dim)
+from hf_adapters.hf_phi3 import load_model, generate
+model = load_model("microsoft/Phi-4-mini-instruct")
+
 # Generate (same for all models)
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained("/path/to/model")
@@ -51,7 +57,7 @@ control:
 
 ```python
 from transformers import AutoModelForCausalLM
-from hf_adapters.hf_granite import (
+from hf_adapters.hf_granite import (  # or hf_qwen3, hf_phi3, etc.
     prepare_for_spyre, generate,
 )
 
@@ -77,6 +83,7 @@ generation loop.
 ```
 hf_adapters/
 ├── hf_common.py          — shared utilities
+│   DEVICE, BLOCK_SIZE,
 │   PrecomputedRotaryEmbedding, apply_rope_matmul,
 │   patch_rmsnorm, pad_lm_head, kv_cache_update,
 │   build_prefill_mask, build_expansion_mask,
@@ -85,7 +92,7 @@ hf_adapters/
 ├── hf_qwen3.py            — Qwen3 adapter
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
-├── hf_phi3.py             — Phi-4 mini adapter (blocked)
+├── hf_phi3.py             — Phi-4 mini adapter (sub-stick blocked)
 └── __init__.py
 ```
 
@@ -196,6 +203,38 @@ HF's `nn.Embedding` automatically falls back to CPU via
 torch-spyre's fallback mechanism. The result is transparently
 transferred to the Spyre device. No adapter code needed.
 
+#### 8. Partial RoPE: Identity-Padded Rotation Matrices (Phi-4)
+
+| | HF Transformers | Adapter |
+|---|---|---|
+| **Approach** | Splits Q/K into rotated and non-rotated portions | `PartialPrecomputedRotaryEmbedding` pads the `[S, 2, 2, rope_dim/2]` rotation matrix to `[S, 2, 2, head_dim/2]` with identity `[[1,0],[0,1]]` entries |
+| **Slicing** | Required (non-rotated dims bypass RoPE) | None — `apply_rope_matmul` on full `head_dim` passes through non-rotated dims unchanged |
+
+**Why:** Avoids the `aten.slice` non-zero offset assertion in
+Spyre's stickify pass that occurs when splitting Q/K into rotated
+and non-rotated portions.
+
+#### 9. LM Head: Chunked (Phi-4)
+
+| | HF Transformers | Adapter |
+|---|---|---|
+| **LM head** | Single `nn.Linear(hidden, vocab)` | 8 smaller `nn.Linear` chunks along vocab dim, each stick-padded |
+| **Forward** | Single matmul | Run each chunk on Spyre, cat results on CPU |
+
+**Why:** Phi-4's 200K+ vocab exceeds Spyre's per-core 256 MB EAR
+(Effective Address Range) limit for a single matmul. Chunking keeps
+each piece within the limit.
+
+#### 10. Fused QKV/MLP: Split at Prepare Time (Phi-4)
+
+| | HF Transformers | Adapter |
+|---|---|---|
+| **QKV** | Single fused `qkv_proj` | Split into separate `q_proj`, `k_proj`, `v_proj` at prepare time |
+| **MLP** | Single fused `gate_up_proj` | Split into separate `gate_proj`, `up_proj` at prepare time |
+
+**Why:** Fused weight splits hit stickify non-zero offset
+assertions. Separate linears trace cleanly in `torch.compile`.
+
 ### What Works As-Is (No Patching)
 
 These HF Transformer components run natively on Spyre without
@@ -214,31 +253,37 @@ modification:
 
 ### Model-Specific Differences
 
-| Feature | Granite 3.3 | Qwen3 | Granite 4.0 | SmolLM3 |
-|---------|------------|-------|-------------|---------|
-| Embedding multiplier | Yes | No | Yes | No |
-| Residual multiplier | Yes | No | Yes | No |
-| Logits scaling | Yes | No | Yes | No |
-| Q/K RMSNorm | No | Yes (per-head) | No | No |
-| Fused MLP weights | No | No | Yes (split at prepare time) | No |
-| NoPE layers | No | No | No | Yes (conditional RoPE) |
-| Attention scaling | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` |
+| Feature | Granite 3.3 | Qwen3 | Granite 4.0 | SmolLM3 | Phi-4 mini |
+|---------|------------|-------|-------------|---------|-----------|
+| Embedding multiplier | Yes | No | Yes | No | No |
+| Residual multiplier | Yes | No | Yes | No | No |
+| Logits scaling | Yes | No | Yes | No | No |
+| Q/K RMSNorm | No | Yes (per-head) | No | No | No |
+| Fused QKV projection | No | No | No | No | Yes (split at prepare time) |
+| Fused MLP weights | No | No | Yes (split at prepare time) | No | Yes (split at prepare time) |
+| NoPE layers | No | No | No | Yes (conditional RoPE) | No |
+| Partial RoPE | No | No | No | No | Yes (identity-padded freqs) |
+| Chunked LM head | No | No | No | No | Yes (8 chunks, 200K+ vocab) |
+| Attention scaling | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` |
 
 ## Adding a New Model
 
 ### Checklist
 
 1. Check `head_dim >= 128` (see Stick Alignment below)
-2. Check for fused weights that need splitting (like Granite 4.0's
-   `input_linear`)
-3. Check for partial RoPE (`partial_rotary_factor < 1.0`) — requires
-   splitting Q/K into rotated/non-rotated portions, which hits
-   stickify non-zero offset assertions (see Known Issues)
+2. Check for fused weights that need splitting (QKV like Phi-4's
+   `qkv_proj`, MLP like Granite 4.0's `input_linear` or Phi-4's
+   `gate_up_proj`)
+3. Check for partial RoPE (`partial_rotary_factor < 1.0`) — use
+   `PartialPrecomputedRotaryEmbedding` with identity padding (see
+   `hf_phi3.py`)
 4. Check for model-specific multipliers (embedding, residual,
    attention, logits) — must be preserved in the block function
 5. Check for per-layer variations (NoPE layers, sliding window,
    MoE routing)
-6. Verify CPU accuracy before testing on Spyre
+6. Check vocab size — models with 200K+ vocab may need chunked LM
+   head to stay within Spyre's per-core EAR limit (see `hf_phi3.py`)
+7. Verify CPU accuracy before testing on Spyre
 
 ### Comparison with FMS `eager_spyre` Approach
 
@@ -252,6 +297,9 @@ modification:
 | Compilation | `block.compile(dynamic=False)` | `torch.compile(block_forward, dynamic=False)` |
 | Generation | `fms.utils.generation` | `hf_common.generate()` |
 | Weight loading | FMS serialization | HF `from_pretrained` then `.to("spyre")` |
+| Partial RoPE | Not supported | Identity-padded rotation matrices (`PartialPrecomputedRotaryEmbedding`) |
+| Fused weights | N/A | Split at prepare time (QKV, gate+up) |
+| Large vocab | N/A | Chunked LM head (8 chunks) |
 | Maintenance | Requires FMS fork | No fork; runtime monkey-patches on stock HF |
 
 ## Stick Alignment Requirement
@@ -270,7 +318,8 @@ expr d4 in [0, d0, 64*d1 + 32*d3 + d4]
 (i.e. `D/2 >= 64`).**
 
 All models tested with `head_dim=128` compile and run. Granite 3.3
-2B (`head_dim=64`) is the only failure.
+2B (`head_dim=64`) and Phi-4 mini (`head_dim=96`) are both sub-stick
+failures.
 
 Note that `head_dim` is not always
 `hidden_size // num_attention_heads`. Some models (e.g. Qwen3)
@@ -299,7 +348,7 @@ will_compile = (head_dim // 2) >= 64
 | No dtype conversion | RMSNorm must stay fp16 | Patched forward with device check |
 | No `aten.slice` in compiled graphs | KV cache indexing falls back to CPU | `spyre.overwrite` for fill mode |
 | `head_dim/2 < 64` (sub-stick) | Stickify assertion on RoPE matmul | Only use models with `head_dim >= 128` |
-| `partial_rotary_factor < 1.0` | Non-zero offset assertion in stickify | Split Q/K weights (not yet implemented; blocks Phi-4) |
+| `partial_rotary_factor < 1.0` | Non-zero offset assertion in stickify | Identity-padded rotation matrices in `PartialPrecomputedRotaryEmbedding` (implemented in `hf_phi3.py`; Phi-4 still blocked by sub-stick `head_dim`) |
 | Zero-length tensors crash `copy_host_to_device` | Segfault on `.to("spyre")` | Create empty tensors directly on device |
 | fp16 overflow on CPU for large multipliers | NaN logits on CPU | Test in float32; runs fine on Spyre hardware |
 
@@ -330,12 +379,14 @@ steps, this causes 63 recompilations on first use.
    call
 3. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)
-4. **Phi-4 mini** — blocked by `partial_rotary_factor=0.75`
-   (stickify non-zero offset assertion). Fix: split Q/K weights so
-   rotated dims are separate linears.
+4. **Phi-4 mini** — adapter code complete (`hf_phi3.py`) with
+   identity-padded partial RoPE, split fused QKV/MLP, and chunked
+   LM head. Partial rotary factor is solved. Still blocked on Spyre
+   by sub-stick `head_dim=96` (`D/2=48 < 64`). Needs compiler fix
+   (same as item 5).
 5. **Stick alignment for small head\_dim** — Granite 3.3 2B
-   (`head_dim=64`) fails stickify. Needs compiler fix or
-   alternative RoPE implementation.
+   (`head_dim=64`) and Phi-4 mini (`head_dim=96`) fail stickify.
+   Needs compiler fix or alternative RoPE implementation.
 
 ## Test Scripts
 
@@ -345,3 +396,9 @@ steps, this causes 63 recompilations on first use.
 | `tests/test_block_cpu_vs_spyre.py` | Per-layer CPU vs Spyre block comparison | Yes |
 | `tests/test_e2e_smoke_spyre.py` | E2E: load model, generate tokens | Yes |
 | `tests/test_e2e_token_compare_spyre.py` | E2E: HF CPU vs adapter Spyre tokens | Yes |
+
+Note: The CPU accuracy test uses smaller model variants for speed
+(Granite 3.3 2B instead of 8B, Granite 4.0 Tiny instead of 1B).
+The block comparison test creates tiny random-weight models (no
+download needed). The Spyre E2E tests use the full models from the
+compatibility matrix.
