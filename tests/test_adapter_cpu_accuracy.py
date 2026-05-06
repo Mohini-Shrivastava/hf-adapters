@@ -391,6 +391,11 @@ MODELS = {
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_llama.py",
     },
+    "gemma": {
+        "name": "Gemma 2B",
+        "path": "unsloth/gemma-2b",
+        "adapter": "hf_gemma.py",
+    },
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
         "path": "ibm-granite/granite-vision-4.1-4b",
