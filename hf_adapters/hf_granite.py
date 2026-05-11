@@ -17,12 +17,13 @@ HuggingFace Transformers adapter for Granite 3.3 models on Spyre.
 
 Usage::
 
-    from hf_adapters.hf_granite import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("/path/to/granite-3.3-8b-instruct")
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        "/path/to/granite-3.3-8b-instruct")
     tokenizer = AutoTokenizer.from_pretrained("/path/to/granite-3.3-8b-instruct")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
@@ -33,13 +34,9 @@ from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     kv_cache_update,
-    load_model_common,
     pad_attention_heads,
     pad_lm_head,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
 )
 
 
@@ -179,13 +176,3 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in model.model.layers
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Granite 3.3 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Granite 3.3 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

@@ -25,12 +25,12 @@ Phi-3 differences from Granite:
 
 Usage::
 
-    from hf_adapters.hf_phi3 import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("microsoft/Phi-4-mini-instruct")
+    model = AutoSpyreModelForCausalLM.from_pretrained("microsoft/Phi-4-mini-instruct")
     tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-4-mini-instruct")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
@@ -41,11 +41,7 @@ from hf_adapters.hf_common import (
     DEVICE,
     apply_rope_matmul,
     kv_cache_update,
-    load_model_common,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
 )
 
 # ---------------------------------------------------------------------------
@@ -379,13 +375,3 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Phi-3/Phi-4 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Phi-3/Phi-4 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)
