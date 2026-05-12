@@ -33,13 +33,11 @@ import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
-    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     kv_cache_update,
-    pad_attention_heads,
     pad_lm_head,
     patch_rmsnorm,
+    prepare_rope_and_heads,
 )
 
 
@@ -148,30 +146,7 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to OLMo2 model in-place."""
     from transformers.models.olmo2.modeling_olmo2 import Olmo2RMSNorm
 
-    cfg = model.config
-    orig_head_dim = (
-        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-    )
-
-    padded_head_dim = None
-    stick_aligned_head_dim = (
-        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
-    ) * (2 * BLOCK_SIZE)
-    if stick_aligned_head_dim > orig_head_dim:
-        padded_head_dim = stick_aligned_head_dim
-        pad_attention_heads(
-            model,
-            model.model.layers,
-            orig_head_dim,
-            padded_head_dim,
-            cfg.num_attention_heads,
-            cfg.num_key_value_heads,
-        )
-
-    model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb,
-        padded_head_dim=padded_head_dim,
-    )
+    prepare_rope_and_heads(model)
     patch_rmsnorm(Olmo2RMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [

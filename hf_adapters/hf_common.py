@@ -766,18 +766,14 @@ def standard_gqa_forward(
     return logits
 
 
-def prepare_standard_gqa(model, rmsnorm_cls):
-    """Apply Spyre adaptations for standard GQA models in-place.
-
-    Args:
-        model: HF model (on CPU, eval mode, requires_grad=False).
-        rmsnorm_cls: The model's RMSNorm class to patch.
-    """
+def prepare_rope_and_heads(model):
     cfg = model.config
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )
 
+    # RoPE reshape [B,L,H,2,D/2] requires D/2 >= BLOCK_SIZE.
+    # Compute minimum stick-aligned head_dim: round up to next multiple of 2*BLOCK_SIZE.
     padded_head_dim = None
     stick_aligned_head_dim = (
         (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
@@ -797,6 +793,16 @@ def prepare_standard_gqa(model, rmsnorm_cls):
         model.model.rotary_emb,
         padded_head_dim=padded_head_dim,
     )
+
+
+def prepare_standard_gqa(model, rmsnorm_cls):
+    """Apply Spyre adaptations for standard GQA models in-place.
+
+    Args:
+        model: HF model (on CPU, eval mode, requires_grad=False).
+        rmsnorm_cls: The model's RMSNorm class to patch.
+    """
+    prepare_rope_and_heads(model)
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
