@@ -22,26 +22,20 @@ Note: Gemma models are gated on HuggingFace and require authentication.
 
 Usage::
 
-    from hf_adapters.hf_gemma import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("google/gemma-7b")
+    model = AutoSpyreModelForCausalLM.from_pretrained("google/gemma-7b")
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
-    apply_rope_matmul,
-    kv_cache_update,
-    load_model_common,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
+    chunk_lm_head,
+    make_standard_gqa_block,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,104 +66,6 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
             return ((1.0 + self.weight.float()) * xf).to(hidden_states.dtype)
 
     rmsnorm_cls.forward = _forward_fp16
-
-
-# ---------------------------------------------------------------------------
-# Chunked LM head (vocab 256K exceeds Spyre per-core EAR limit)
-# ---------------------------------------------------------------------------
-
-
-def _chunk_lm_head(model, num_chunks=8):
-    """Split LM head weight into N chunks along vocab dim."""
-    w = model.lm_head.weight  # [vocab, hidden]
-    vocab, hidden = w.shape
-    chunk_size = (vocab + num_chunks - 1) // num_chunks
-
-    STICK = 64
-    chunks = nn.ModuleList()
-    real_sizes = []
-    for i in range(num_chunks):
-        start = i * chunk_size
-        end = min(start + chunk_size, vocab)
-        w_chunk = w[start:end].clone()
-        sz = w_chunk.shape[0]
-        real_sizes.append(sz)
-        padded_sz = ((sz + STICK - 1) // STICK) * STICK
-        if padded_sz != sz:
-            w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
-        chunk = nn.Linear(hidden, padded_sz, bias=False)
-        chunk.weight = nn.Parameter(w_chunk, requires_grad=False)
-        chunks.append(chunk)
-
-    model._spyre_lm_head_chunks = chunks
-    model._spyre_lm_chunk_sizes = real_sizes
-
-
-# ---------------------------------------------------------------------------
-# Compiled block
-# ---------------------------------------------------------------------------
-
-
-def _make_compiled_block(layer):
-    """Compiled block for Gemma: pre-norm, standard GQA, no multipliers."""
-    attn = layer.self_attn
-    mlp = layer.mlp
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-
-    def block_forward(
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        is_filling,
-        token_index,
-        cache_position,
-    ):
-        residual = hidden_states
-        h = input_ln(hidden_states)
-
-        bsz, seq_len, _ = h.shape
-        q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
-
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            is_filling,
-            token_index,
-            cache_position,
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=attn.scaling,
-            enable_gqa=True,
-        )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = attn.o_proj(attn_out)
-
-        h = residual + attn_out
-
-        residual = h
-        h = post_attn_ln(h)
-        h = mlp(h)
-        h = residual + h
-
-        return h, key_cache, value_cache
-
-    return torch.compile(block_forward, dynamic=False)
 
 
 # ---------------------------------------------------------------------------
@@ -229,17 +125,7 @@ def prepare_for_spyre(model):
 
     _patch_gemma_rmsnorm(GemmaRMSNorm)
     model._spyre_rope = PrecomputedRotaryEmbedding(model.model.rotary_emb)
-    _chunk_lm_head(model)
+    chunk_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in model.model.layers
+        make_standard_gqa_block(layer) for layer in model.model.layers
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Gemma model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Gemma on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)
