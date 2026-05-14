@@ -43,6 +43,7 @@ from hf_adapters.hf_common import (
     chunk_lm_head,
     kv_cache_update,
     patch_rmsnorm,
+    split_fused_linear,
 )
 
 # ---------------------------------------------------------------------------
@@ -156,20 +157,6 @@ def _split_fused_qkv(attn, num_q, num_kv, head_dim):
         _mk(w[q_dim : q_dim + k_dim], k_dim),
         _mk(w[q_dim + k_dim :], k_dim),
     )
-
-
-def _split_fused_mlp(mlp):
-    """Split fused gate_up_proj into separate gate/up projections."""
-    w = mlp.gate_up_proj.weight
-    half = w.shape[0] // 2
-    hidden = w.shape[1]
-
-    def _mk(w_data, out_dim):
-        p = nn.Linear(hidden, out_dim, bias=False)
-        p.weight = nn.Parameter(w_data.clone(), requires_grad=False)
-        return p
-
-    return _mk(w[:half], half), _mk(w[half:], half)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +317,7 @@ def prepare_for_spyre(model):
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)
 
-        gate, up = _split_fused_mlp(layer.mlp)
+        gate, up = split_fused_linear(layer.mlp.gate_up_proj.weight)
         model._spyre_gate_projs.append(gate)
         model._spyre_up_projs.append(up)
 

@@ -356,6 +356,23 @@ def chunk_lm_head(model, num_chunks=8):
     model._spyre_lm_chunk_sizes = real_sizes
 
 
+def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
+    """Split a [2*out, in] fused weight into two [out, in] nn.Linear modules.
+
+    Used by models with fused QKV (phi3) or fused gate+up MLP (granitemoehybrid).
+    Each half of the weight becomes a separate linear layer with bias=False.
+    """
+    half = w.shape[0] // 2
+    hidden = w.shape[1]
+
+    def _mk(data):
+        p = nn.Linear(hidden, half, bias=False)
+        p.weight = nn.Parameter(data.clone(), requires_grad=False)
+        return p
+
+    return _mk(w[:half]), _mk(w[half:])
+
+
 # ---------------------------------------------------------------------------
 # Mask builders
 # ---------------------------------------------------------------------------
