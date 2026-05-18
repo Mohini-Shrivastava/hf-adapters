@@ -36,6 +36,7 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
+    get_backbone,
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
@@ -122,9 +123,9 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to Qwen3 model in-place."""
     from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-    model._spyre_rope = PrecomputedRotaryEmbedding(model.model.rotary_emb)
+    model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
     patch_rmsnorm(Qwen3RMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in model.model.layers
+        _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]

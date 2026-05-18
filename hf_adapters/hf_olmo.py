@@ -32,6 +32,7 @@ Usage::
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
+    get_backbone,
     make_standard_gqa_block,
     pad_lm_head,
     prepare_rope_and_heads,
@@ -81,5 +82,5 @@ def prepare_for_spyre(model):
     _patch_olmo_layernorm(OlmoLayerNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer) for layer in model.model.layers
+        make_standard_gqa_block(layer) for layer in get_backbone(model).layers
     ]

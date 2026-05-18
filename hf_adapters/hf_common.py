@@ -33,6 +33,24 @@ DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
+def get_backbone(model):
+    """Return the transformer backbone of an HF model.
+
+    Auto-loaded models come in two shapes:
+
+    - ``AutoModelForCausalLM`` returns a wrapper (``Qwen3ForCausalLM``,
+      ``LlamaForCausalLM``, ...) whose backbone lives at ``model.model``
+      and which exposes ``model.lm_head``.
+    - ``AutoModel`` returns the bare backbone (``Qwen3Model``,
+      ``LlamaModel``, ...) — no ``.model`` attribute, no ``lm_head``.
+
+    Adapter code reaches into the backbone to access ``embed_tokens``,
+    ``layers``, ``norm``, ``rotary_emb``. This accessor resolves the right
+    object regardless of how the model was loaded.
+    """
+    return model.model if hasattr(model, "model") else model
+
+
 # ---------------------------------------------------------------------------
 # RoPE: precompute rotation matrices on CPU (FMS approach)
 # ---------------------------------------------------------------------------
@@ -837,7 +855,8 @@ def standard_gqa_backbone_forward(
     Returns ``last_hidden_state`` (no ``lm_head``). Used directly by embedding
     callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
     """
-    h = model.model.embed_tokens(input_ids)
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
 
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -853,7 +872,7 @@ def standard_gqa_backbone_forward(
             cache_position,
         )
 
-    h = model.model.norm(h)
+    h = backbone.norm(h)
     return h
 
 
@@ -899,7 +918,7 @@ def prepare_rope_and_heads(model):
         padded_head_dim = stick_aligned_head_dim
         pad_attention_heads(
             model,
-            model.model.layers,
+            get_backbone(model).layers,
             orig_head_dim,
             padded_head_dim,
             cfg.num_attention_heads,
@@ -907,7 +926,7 @@ def prepare_rope_and_heads(model):
         )
 
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb,
+        get_backbone(model).rotary_emb,
         padded_head_dim=padded_head_dim,
     )
 
@@ -923,7 +942,7 @@ def prepare_standard_gqa(model, rmsnorm_cls):
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer) for layer in model.model.layers
+        make_standard_gqa_block(layer) for layer in get_backbone(model).layers
     ]
 
 

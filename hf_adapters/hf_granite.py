@@ -31,6 +31,7 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     apply_rope_matmul,
+    get_backbone,
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
@@ -114,8 +115,9 @@ def _run_backbone_forward(
     cache_position,
 ):
     """Granite 3.3 backbone: embedding * multiplier, blocks, norm."""
-    h = model.model.embed_tokens(input_ids)
-    h = h * model.model.embedding_multiplier
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
+    h = h * backbone.embedding_multiplier
 
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -131,7 +133,7 @@ def _run_backbone_forward(
             cache_position,
         )
 
-    h = model.model.norm(h)
+    h = backbone.norm(h)
     return h
 
 
@@ -171,5 +173,5 @@ def prepare_for_spyre(model):
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in model.model.layers
+        _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]
