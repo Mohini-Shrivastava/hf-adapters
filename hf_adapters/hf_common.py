@@ -315,7 +315,13 @@ def patch_rmsnorm(rmsnorm_cls):
 
 
 def pad_lm_head(model):
-    """Pad LM head vocab dim to stick-aligned size (+64 for work division)."""
+    """Pad LM head vocab dim to stick-aligned size (+64 for work division).
+
+    No-op when ``model`` has no ``lm_head`` (e.g. backbones loaded via
+    ``AutoModel`` for embedding workloads).
+    """
+    if not hasattr(model, "lm_head"):
+        return
     w = model.lm_head.weight
     vocab = w.shape[0]
     padded = ((vocab + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE) + BLOCK_SIZE
@@ -331,7 +337,11 @@ def chunk_lm_head(model, num_chunks=8):
     Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
     We replace the single lm_head with N smaller nn.Linear modules.
     Each chunk processes vocab_size/N output dims.
+
+    No-op when ``model`` has no ``lm_head``.
     """
+    if not hasattr(model, "lm_head"):
+        return
     w = model.lm_head.weight  # [vocab, hidden]
     vocab, hidden = w.shape
     chunk_size = (vocab + num_chunks - 1) // num_chunks
