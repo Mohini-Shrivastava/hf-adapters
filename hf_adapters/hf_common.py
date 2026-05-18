@@ -792,7 +792,7 @@ def make_standard_gqa_block(layer):
     return torch.compile(block_forward, dynamic=False)
 
 
-def standard_gqa_forward(
+def standard_gqa_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -803,7 +803,11 @@ def standard_gqa_forward(
     token_index,
     cache_position,
 ):
-    """Standard GQA forward: embedding, RoPE, compiled blocks, norm, LM head."""
+    """Standard GQA backbone: embedding, RoPE, compiled blocks, norm.
+
+    Returns ``last_hidden_state`` (no ``lm_head``). Used directly by embedding
+    callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
+    """
     h = model.model.embed_tokens(input_ids)
 
     selected_freqs = model._spyre_rope(h, position_ids)
@@ -821,8 +825,33 @@ def standard_gqa_forward(
         )
 
     h = model.model.norm(h)
-    logits = model.lm_head(h)
-    return logits
+    return h
+
+
+def standard_gqa_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Standard GQA causal-LM forward: backbone + LM head."""
+    h = standard_gqa_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
+    return model.lm_head(h)
 
 
 def prepare_rope_and_heads(model):

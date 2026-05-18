@@ -112,7 +112,7 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_forward(
+def _run_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -123,7 +123,7 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """Granite 4.0 forward: embedding * multiplier, blocks, norm, head / scaling."""
+    """Granite 4.0 backbone: embedding * multiplier, blocks, norm."""
     h = model.model.embed_tokens(input_ids)
     h = h * model.config.embedding_multiplier
 
@@ -142,6 +142,32 @@ def _run_forward(
         )
 
     h = model.model.norm(h)
+    return h
+
+
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Granite 4.0 causal-LM forward: backbone + head / scaling."""
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
     logits = model.lm_head(h)
     logits = logits / model.config.logits_scaling
     return logits

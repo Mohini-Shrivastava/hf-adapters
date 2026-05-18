@@ -237,7 +237,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
 # ---------------------------------------------------------------------------
 
 
-def _run_forward(
+def _run_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -248,6 +248,7 @@ def _run_forward(
     token_index,
     cache_position,
 ):
+    """Phi-3 backbone: embedding, blocks, norm."""
     h = model.model.embed_tokens(input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -264,6 +265,32 @@ def _run_forward(
         )
 
     h = model.model.norm(h)
+    return h
+
+
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Phi-3 causal-LM forward: backbone + chunked LM head."""
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
 
     # Chunked LM head: large vocab (200K+) exceeds Spyre's per-core EAR limit.
     # Split into N chunks, run each on Spyre, cat on CPU.
