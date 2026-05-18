@@ -293,7 +293,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
             elif col == "is_moe":
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_gated":
-                formatted_row[col] = "🔒" if value.lower() == "true" else "🔓"
+                formatted_row[col] = "🔒" if value.lower() == "true" else "🆓"
             else:
                 formatted_row[col] = value
         rows.append(formatted_row)
