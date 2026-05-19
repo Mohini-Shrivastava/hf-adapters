@@ -403,7 +403,9 @@ def create_filter_panel():
             "text-sm text-gray-600 mb-2"
         )
 
-        with ui.row().classes("w-full gap-2 flex-wrap"):
+        with ui.element("div").classes(
+            "w-full grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2"
+        ):
             # Key filters with multi-select
             filter_fields = [
                 ("model_type", "Model Type"),
@@ -436,10 +438,10 @@ def create_filter_panel():
                         multiple=True,
                         clearable=True,
                         on_change=lambda e, f=field: update_filter(f, e.value),
-                    ).classes("flex-1 min-w-[200px]").props("use-chips")
+                    ).classes("w-full").props("use-chips")
 
             # Numeric range filter on parameters (in billions, B)
-            with ui.row().classes("items-center gap-2 min-w-[260px]"):
+            with ui.row().classes("items-center gap-2 w-full"):
                 ui.label("Params (B):").classes("text-sm font-semibold")
                 ui.number(
                     label="Min",
@@ -448,7 +450,7 @@ def create_filter_panel():
                     step=0.1,
                     format="%.2f",
                     on_change=lambda e: update_params_range(e.value, _UNSET),
-                ).classes("w-28").props("clearable")
+                ).classes("flex-1").props("clearable")
                 ui.number(
                     label="Max",
                     value=20,
@@ -456,7 +458,7 @@ def create_filter_panel():
                     step=0.1,
                     format="%.2f",
                     on_change=lambda e: update_params_range(_UNSET, e.value),
-                ).classes("w-28").props("clearable")
+                ).classes("flex-1").props("clearable")
 
         with ui.row().classes("gap-2 mt-2"):
             ui.button("Clear All Filters", on_click=clear_filters).props(
