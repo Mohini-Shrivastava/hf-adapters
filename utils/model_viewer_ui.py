@@ -494,8 +494,13 @@ async def refresh_display_async(viewer: ModelDataViewer, content_container) -> N
             create_data_table(filtered_data, viewer.columns)
 
 
-def create_filter_panel_lazy(viewer: ModelDataViewer, content_container) -> None:
-    """Create the filter panel with debounced refresh."""
+def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> None:
+    """Create the filter panel with debounced refresh.
+
+    Args:
+        viewer: The ModelDataViewer instance
+        get_content_container: A callable that returns the content container
+    """
 
     async def debounced_refresh():
         """Debounced refresh to prevent race conditions."""
@@ -510,7 +515,9 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, content_container) -> None
         # Schedule new refresh after delay
         async def delayed_refresh():
             await asyncio.sleep(viewer._refresh_delay)
-            await refresh_display_async(viewer, content_container)
+            container = get_content_container()
+            if container is not None:
+                await refresh_display_async(viewer, container)
 
         viewer._refresh_task = asyncio.create_task(delayed_refresh())
 
@@ -651,15 +658,17 @@ def main_page():
 
     # Main content
     with ui.column().classes("w-full max-w-[1600px] mx-auto p-4"):
-        # Filter panel — renders first (at top of page).
-        # The content container is created right after so filter callbacks
-        # can refresh it.
-        content_container = ui.column().classes("w-full")
+        # Use a list to hold the content container reference (late binding)
+        content_ref: List[Any] = [None]
 
-        create_filter_panel_lazy(viewer, content_container)
+        # Filter panel — renders first (at top of page).
+        create_filter_panel_lazy(viewer, lambda: content_ref[0])
+
+        # Content container (rendered below the filter panel).
+        content_ref[0] = ui.column().classes("w-full")
 
         # Initial display
-        asyncio.create_task(refresh_display_async(viewer, content_container))
+        asyncio.create_task(refresh_display_async(viewer, content_ref[0]))
 
 
 def main():
