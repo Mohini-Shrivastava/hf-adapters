@@ -55,7 +55,7 @@ _pkg = type(sys)("hf_adapters")
 _pkg.__path__ = [ADAPTERS_DIR]
 sys.modules["hf_adapters"] = _pkg
 
-import hf_adapters.st_backend  # noqa: E402  (registers "spyre" backend with ST)
+import hf_adapters.st_backend  # noqa: F401, E402  (registers "spyre" backend with ST)
 
 # ---------------------------------------------------------------------------
 # Test configuration
