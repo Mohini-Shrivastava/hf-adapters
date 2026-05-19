@@ -140,7 +140,7 @@ class ModelDataViewer:
 
 
 # Global viewer instance
-viewer = ModelDataViewer("top_generative_models.csv")
+viewer = ModelDataViewer("resources/top_generative_models.csv")
 
 # Global UI state
 ui_state = {"content_container": None, "stats_cards": {}, "filter_selects": {}}
