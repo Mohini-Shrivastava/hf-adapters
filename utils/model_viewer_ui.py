@@ -410,6 +410,7 @@ def create_filter_panel():
                 ("architectures", "Architecture"),
                 ("config_class", "Config Class"),
                 ("library", "Library"),
+                ("is_supported", "Supported"),
                 ("is_moe", "MoE"),
                 ("is_gated", "Gated"),
                 ("Year", "Year"),
