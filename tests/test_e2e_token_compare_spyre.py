@@ -32,7 +32,6 @@ import traceback
 
 import torch
 import torch.nn.functional as F
-import torch_spyre  # noqa: F401 — patches torch.empty to accept device_layout
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
