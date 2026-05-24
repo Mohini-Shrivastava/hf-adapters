@@ -14,52 +14,31 @@
 
 """CPU accuracy test for the sentence-transformers ``backend="spyre"`` hook.
 
-Loads each checkpoint twice:
+For each registered checkpoint, ``test_st_backend[<key>]`` loads the model
+twice:
+
   1. Stock ``SentenceTransformer`` on CPU (reference).
-  2. ``SentenceTransformer(..., backend="spyre")`` via ``hf_adapters.st_backend``
-     with ``DEVICE`` patched to ``"cpu"`` and compiled blocks unwrapped.
+  2. ``SentenceTransformer(..., backend="spyre")`` via ``hf_adapters.st_backend``,
+     with compiled blocks unwrapped.
 
-Compares per-sentence cosine similarity between the two sets of embeddings.
-All similarities must exceed ``COS_SIM_THRESHOLD``.
+Asserts per-sentence cosine similarity stays above ``COS_SIM_THRESHOLD``.
 
-Usage::
-
-    python tests/test_st_backend_cpu.py
-    python tests/test_st_backend_cpu.py qwen3_embed
+DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``;
+this file is plain pytest. The ``hf_adapters.st_backend`` import is deferred
+to inside the test (its side-effect registers the "spyre" backend with
+sentence-transformers) so module collection succeeds on hosts that lack
+``sentence_transformers``.
 """
 
 import gc
-import importlib.util
-import os
-import sys
 
+import pytest
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------------------
-# Patch DEVICE="cpu" in hf_common BEFORE any adapter import.
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
-
-_common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
-_common_spec = importlib.util.spec_from_file_location(
-    "hf_adapters.hf_common", _common_path
-)
-_common_mod = importlib.util.module_from_spec(_common_spec)
-sys.modules["hf_adapters.hf_common"] = _common_mod
-_common_spec.loader.exec_module(_common_mod)
-_common_mod.DEVICE = "cpu"
-
-_pkg = type(sys)("hf_adapters")
-_pkg.__path__ = [ADAPTERS_DIR]
-sys.modules["hf_adapters"] = _pkg
-
-import hf_adapters.st_backend  # noqa: F401, E402  (registers "spyre" backend with ST)
-
-# ---------------------------------------------------------------------------
-# Test configuration
-# ---------------------------------------------------------------------------
+# sentence_transformers is an optional dependency; skip the whole module if
+# it's missing. The hf_adapters.st_backend import is deferred to inside the
+# test so collection doesn't fail on CPU-only hosts that lack ST.
+pytest.importorskip("sentence_transformers")
 
 COS_SIM_THRESHOLD = 0.999
 
@@ -86,98 +65,35 @@ TEST_MODELS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _unwrap_compiled_blocks(model):
-    """Replace torch.compile wrappers with their original modules for CPU testing."""
-    if hasattr(model, "_spyre_compiled_blocks"):
-        model._spyre_compiled_blocks = [
-            getattr(b, "_orig_mod", b) for b in model._spyre_compiled_blocks
-        ]
-
-
-def test_st_backend_cpu(model_key):
+@pytest.mark.parametrize(
+    "model_key", list(TEST_MODELS.keys()), ids=list(TEST_MODELS.keys())
+)
+def test_st_backend(model_key, unwrap_compiled_blocks):
     from sentence_transformers import SentenceTransformer
 
-    cfg = TEST_MODELS[model_key]
-    print(f"\n{'='*70}")
-    print(f"  {cfg['name']}  ({cfg['path']})")
-    print(f"{'='*70}")
+    import hf_adapters.st_backend  # noqa: F401  (registers "spyre" backend with ST)
 
-    # --- Reference: stock ST on CPU ---
-    print("  Loading reference (stock SentenceTransformer) ...")
+    cfg = TEST_MODELS[model_key]
+
+    # Reference: stock ST on CPU
     ref_model = SentenceTransformer(cfg["path"], device="cpu")
-    ref_embeddings = ref_model.encode(TEST_SENTENCES, convert_to_tensor=True)  # [N, H]
+    ref_embeddings = ref_model.encode(TEST_SENTENCES, convert_to_tensor=True)
     del ref_model
     gc.collect()
 
-    # --- Ours: ST with backend="spyre" (DEVICE patched to cpu) ---
-    print("  Loading spyre backend model ...")
+    # Spyre backend (DEVICE patched to cpu by conftest)
     spyre_model = SentenceTransformer(cfg["path"], backend="spyre", device="cpu")
-    _unwrap_compiled_blocks(spyre_model._first_module().model)
-    spyre_embeddings = spyre_model.encode(
-        TEST_SENTENCES, convert_to_tensor=True
-    )  # [N, H]
+    unwrap_compiled_blocks(spyre_model._first_module().model)
+    spyre_embeddings = spyre_model.encode(TEST_SENTENCES, convert_to_tensor=True)
     del spyre_model
     gc.collect()
 
-    # Normalize both before cosine sim (ref may already be normalized, but be explicit)
     ref_norm = F.normalize(ref_embeddings.float(), dim=-1)
     spyre_norm = F.normalize(spyre_embeddings.float(), dim=-1)
-
-    cos_sims = (ref_norm * spyre_norm).sum(dim=-1)  # [N]
-
-    print(f"\n  {'Sentence':<55} {'cos_sim':>8}")
-    print(f"  {'-'*55} {'-'*8}")
-    all_pass = True
-    for sent, sim in zip(TEST_SENTENCES, cos_sims.tolist()):
-        ok = sim >= COS_SIM_THRESHOLD
-        flag = "OK" if ok else "FAIL"
-        print(f"  {sent[:54]:<55} {sim:>8.6f}  {flag}")
-        if not ok:
-            all_pass = False
+    cos_sims = (ref_norm * spyre_norm).sum(dim=-1)
 
     min_sim = cos_sims.min().item()
-    result = "PASS" if all_pass else "FAIL"
-    print(f"\n  Min cosine similarity: {min_sim:.6f}  (threshold: {COS_SIM_THRESHOLD})")
-    print(f"  Result: {result}")
-    return all_pass
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        keys = sys.argv[1:]
-    else:
-        keys = ["qwen3_embed"]
-
-    results = {}
-    for key in keys:
-        if key not in TEST_MODELS:
-            print(f"Unknown model key '{key}'. Available: {list(TEST_MODELS)}")
-            sys.exit(1)
-        try:
-            results[key] = test_st_backend_cpu(key)
-        except Exception:
-            import traceback
-
-            traceback.print_exc()
-            results[key] = False
-
-    print(f"\n{'='*70}")
-    print("  SUMMARY")
-    print(f"{'='*70}")
-    for key, passed in results.items():
-        name = TEST_MODELS[key]["name"]
-        status = "PASS" if passed else "FAIL"
-        print(f"  {name:<40} {status}")
-    print(f"{'='*70}")
-
-    if not all(results.values()):
-        sys.exit(1)
+    assert min_sim >= COS_SIM_THRESHOLD, (
+        f"min cosine {min_sim:.6f} < threshold {COS_SIM_THRESHOLD}; "
+        f"per-sentence: {cos_sims.tolist()}"
+    )
