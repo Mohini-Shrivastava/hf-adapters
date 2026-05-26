@@ -182,6 +182,51 @@ def kv_cache_update(
 # ---------------------------------------------------------------------------
 
 
+def _pad_proj_output_simple(proj, n_heads, orig_head_dim, padded_head_dim):
+    """End-pad each head of a [n_heads*head_dim, hidden] output projection.
+
+    Used for V (no RoPE) and for Q/K/V on non-RoPE encoders.
+    """
+    w = proj.weight
+    hidden = w.shape[1]
+    new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[d : d + orig_head_dim, :] = w[s : s + orig_head_dim, :]
+    new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    if proj.bias is not None:
+        new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_b[d : d + orig_head_dim] = proj.bias[s : s + orig_head_dim]
+        new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+    return new_proj
+
+
+def _pad_proj_input_simple(proj, n_heads, orig_head_dim, padded_head_dim):
+    """End-pad each head along the input dim of an O-style projection.
+
+    Shape goes from [hidden, n_heads*orig_head_dim] to
+    [hidden, n_heads*padded_head_dim]. Bias is along the output dim and is
+    unchanged.
+    """
+    w = proj.weight
+    hidden = w.shape[0]
+    new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[:, d : d + orig_head_dim] = w[:, s : s + orig_head_dim]
+    new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    if proj.bias is not None:
+        new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
+    return new_proj
+
+
 def pad_attention_heads(
     model, layers, orig_head_dim, padded_head_dim, num_heads, num_kv_heads
 ):
@@ -255,55 +300,80 @@ def pad_attention_heads(
             new_proj.bias = nn.Parameter(new_b, requires_grad=False)
         return new_proj
 
-    # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
-    def _pad_v_simple(proj, n_heads):
-        """Simple end-padding per head for V."""
-        w = proj.weight
-        hidden = w.shape[1]
-        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
-        for h in range(n_heads):
-            s = h * orig_head_dim
-            d = h * padded_head_dim
-            new_w[d : d + orig_head_dim, :] = w[s : s + orig_head_dim, :]
-        new_proj = nn.Linear(
-            hidden, n_heads * padded_head_dim, bias=proj.bias is not None
-        )
-        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-        if proj.bias is not None:
-            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
-            for h in range(n_heads):
-                s = h * orig_head_dim
-                d = h * padded_head_dim
-                new_b[d : d + orig_head_dim] = proj.bias[s : s + orig_head_dim]
-            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
-        return new_proj
-
-    def _pad_o(proj, n_heads):
-        """Simple end-padding along input dim for O."""
-        w = proj.weight
-        hidden = w.shape[0]
-        new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
-        for h in range(n_heads):
-            s = h * orig_head_dim
-            d = h * padded_head_dim
-            new_w[:, d : d + orig_head_dim] = w[:, s : s + orig_head_dim]
-        new_proj = nn.Linear(
-            n_heads * padded_head_dim, hidden, bias=proj.bias is not None
-        )
-        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-        if proj.bias is not None:
-            new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
-        return new_proj
-
     for layer in layers:
         attn = layer.self_attn
         orig_scaling = attn.scaling
         attn.q_proj = _pad_qk_rope(attn.q_proj, num_heads)
         attn.k_proj = _pad_qk_rope(attn.k_proj, num_kv_heads)
-        attn.v_proj = _pad_v_simple(attn.v_proj, num_kv_heads)
-        attn.o_proj = _pad_o(attn.o_proj, num_heads)
+        # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
+        attn.v_proj = _pad_proj_output_simple(
+            attn.v_proj, num_kv_heads, orig_head_dim, padded_head_dim
+        )
+        attn.o_proj = _pad_proj_input_simple(
+            attn.o_proj, num_heads, orig_head_dim, padded_head_dim
+        )
         attn.head_dim = padded_head_dim
         attn.scaling = orig_scaling
+
+    model._spyre_head_dim = padded_head_dim
+
+
+def pad_attention_heads_simple(
+    model, layers, orig_head_dim, padded_head_dim, num_heads
+):
+    """Zero-pad Q/K/V/O attention projections for non-RoPE encoders (BERT).
+
+    Counterpart of ``pad_attention_heads`` for encoders that do not run RoPE.
+    All four projections use simple end-padding per head (no interleaved
+    ``[2, D/2]`` layout). Used to lift ``head_dim`` to a Spyre stick boundary
+    (one stick = ``BLOCK_SIZE`` elements at fp16) so SDPA / Q-K matmul lower
+    cleanly — e.g. all-MiniLM-L6-v2 (head_dim=32 → 64).
+
+    Updates ``BertSelfAttention`` attributes that the compiled block closes
+    over: ``attention_head_size`` and ``all_head_size``. ``num_attention_heads``
+    stays. The SDPA scale is auto-computed from the tensor's last dim, so no
+    explicit scale fixup is needed.
+
+    Args:
+        model: HF model — stores padded dim as ``model._spyre_head_dim``.
+        layers: Iterable of encoder layers (each must have ``attention.self``
+            and ``attention.output.dense``).
+        orig_head_dim: Original head dimension.
+        padded_head_dim: Target head dimension (must be > orig_head_dim and
+            >= BLOCK_SIZE).
+        num_heads: Number of attention heads.
+    """
+    assert padded_head_dim > orig_head_dim, (
+        f"padded_head_dim ({padded_head_dim}) must exceed "
+        f"orig_head_dim ({orig_head_dim})"
+    )
+    assert (
+        padded_head_dim >= BLOCK_SIZE
+    ), f"padded_head_dim ({padded_head_dim}) must be >= BLOCK_SIZE ({BLOCK_SIZE})"
+
+    for layer in layers:
+        attn = layer.attention.self
+        attn.query = _pad_proj_output_simple(
+            attn.query, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.key = _pad_proj_output_simple(
+            attn.key, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.value = _pad_proj_output_simple(
+            attn.value, num_heads, orig_head_dim, padded_head_dim
+        )
+        layer.attention.output.dense = _pad_proj_input_simple(
+            layer.attention.output.dense,
+            num_heads,
+            orig_head_dim,
+            padded_head_dim,
+        )
+        attn.attention_head_size = padded_head_dim
+        attn.all_head_size = num_heads * padded_head_dim
+        # SDPA's default scale is 1/sqrt(D) on the *padded* dim, but Q·K^T
+        # only sums over the original non-zero entries. Stash the original
+        # so the compiled block can pass scale=1/sqrt(orig) explicitly.
+        attn._spyre_orig_head_dim = orig_head_dim
 
     model._spyre_head_dim = padded_head_dim
 
@@ -496,15 +566,30 @@ def _patch_torch_empty():
 def _embedding_param_ids(model):
     """Data-pointers of weights that must keep the default (column-major) layout.
 
-    The token embedding is used as a gather, not a matmul, so it should not
-    get a row-major SpyreTensorLayout. Returns the set of ``data_ptr()`` values
-    for the embedding weight(s) we want to leave alone.
+    Gather-only embedding weights (used via nn.Embedding, not matmul) must not
+    receive a row-major SpyreTensorLayout. Returns the set of ``data_ptr()``
+    values for all such weights.
+
+    Covers:
+    - Decoder-style backbones: ``backbone.embed_tokens``.
+    - BERT-style backbones: ``backbone.embeddings.{word,position,token_type}_embeddings``.
     """
     ids = set()
     backbone = get_backbone(model)
+
+    # Decoder-style: single embed_tokens
     embed = getattr(backbone, "embed_tokens", None)
     if embed is not None and hasattr(embed, "weight"):
         ids.add(embed.weight.data_ptr())
+
+    # Encoder-style: embeddings submodule with multiple gather tables
+    embeddings = getattr(backbone, "embeddings", None)
+    if embeddings is not None:
+        for name in ("word_embeddings", "position_embeddings", "token_type_embeddings"):
+            sub = getattr(embeddings, name, None)
+            if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
+                ids.add(sub.weight.data_ptr())
+
     return ids
 
 
@@ -987,6 +1072,57 @@ def standard_gqa_forward(
     return model.lm_head(h)
 
 
+# ---------------------------------------------------------------------------
+# Encoder-only forward (BERT-family: no RoPE, no KV cache)
+# ---------------------------------------------------------------------------
+
+
+def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
+    """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
+
+    Used by BERT-style (no RoPE, no KV cache) encoder-only models. Counterpart
+    of ``standard_gqa_backbone_forward`` for decoder models.
+
+    Args:
+        model: Prepared BertModel (or equivalent) on Spyre. Must have
+            ``model._spyre_compiled_blocks`` set by ``prepare_for_spyre``.
+        input_ids: ``[B, padded_len]`` token ids.
+        attn_mask: ``[B, 1, padded_len, padded_len]`` additive fp16 mask built
+            with ``is_causal=False`` (zeros for real-token pairs, -inf elsewhere).
+        position_ids: ``[B, padded_len]`` position indices (0..actual_len-1 for
+            real tokens, 0 for pad slots).
+        token_type_ids: ``[B, padded_len]`` long tensor (all zeros for
+            single-sentence embedding workloads).
+
+    Returns:
+        ``last_hidden_state`` ``[B, padded_len, H]``.
+
+    Note: ``nn.LayerNorm`` runs as-is inside the compiled block on CPU. On
+    Spyre the compiler should lower it via the ``spyre::layer_norm`` op; if not,
+    a per-instance wrapper will be needed in a follow-up.
+    """
+    backbone = get_backbone(model)
+    emb = backbone.embeddings
+    h = (
+        emb.word_embeddings(input_ids)
+        + emb.position_embeddings(position_ids)
+        + emb.token_type_embeddings(token_type_ids)
+    )
+    h = emb.LayerNorm(h)
+    # Spyre layout workaround: BERT post-LN ends each block on a broadcast
+    # against a 1D weight/bias. Spyre tensors produced this way read
+    # correctly via ``.to("cpu")`` but are mis-read by subsequent on-device
+    # ops, so the next compiled block's matmul sees garbage. ``.clone()``
+    # in eager Python (outside torch.compile) allocates a fresh
+    # canonical-layout tensor and copies through, fixing the handoff.
+    h = h.clone() if h.device.type == "spyre" else h
+    for compiled_block in model._spyre_compiled_blocks:
+        h = compiled_block(h, attn_mask)
+        if h.device.type == "spyre":
+            h = h.clone()
+    return h
+
+
 def prepare_rope_and_heads(model):
     cfg = model.config
     orig_head_dim = (
@@ -1146,5 +1282,84 @@ def prefill_embed(
     )
 
     # Crop the block-pad back off; tokenizer pad stays so pooling can mask it
+    h = h[:, :seq_len, :]
+    return h, attention_mask
+
+
+# ---------------------------------------------------------------------------
+# Encoder-only prefill driver (BERT-family)
+# ---------------------------------------------------------------------------
+
+
+def prefill_encoder(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+):
+    """One-shot prefill for encoder-only (BERT-style) embedding models.
+
+    Counterpart of ``prefill_embed`` for models with no KV cache and no RoPE.
+    (``prefill_embed`` reads `model.config.num_key_value_heads`` and
+    allocates KV caches, which ``BertConfig`` and similar encoder configs do not provide.
+
+    Args:
+        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
+            token_type_ids) -> [B, padded_len, H]``. Pass the adapter's
+            ``_run_backbone_forward`` (i.e. ``encoder_backbone_forward``).
+        model: Prepared encoder backbone on device (loaded via ``AutoModel``).
+        input_ids: ``[B, L]`` token ids. Right-padded by the tokenizer.
+        attention_mask: ``[B, L]`` mask; 1 for real tokens, 0 for pad.
+        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None
+            (correct for single-sentence embedding workloads).
+
+    Returns:
+        Tuple ``(last_hidden_state, attention_mask)``:
+          - ``last_hidden_state``: ``[B, L, H]`` cropped to the input length.
+          - ``attention_mask``: the input mask, unchanged (for pooling callers).
+    """
+    bsz, seq_len = input_ids.shape
+
+    # Pad to BLOCK_SIZE multiple on the right
+    padded_len = math.ceil(seq_len / BLOCK_SIZE) * BLOCK_SIZE
+    pad_amount = padded_len - seq_len
+    if pad_amount > 0:
+        input_ids = F.pad(input_ids, (0, pad_amount), value=0)
+
+    # Per-sequence real-token count
+    actual_lengths = attention_mask.sum(dim=1)  # [B]
+
+    # Position ids: 0..actual_len-1 for real tokens, 0 for pads
+    position_ids = torch.zeros((bsz, padded_len), dtype=torch.long)
+    for b in range(bsz):
+        actual = actual_lengths[b].item()
+        position_ids[b, :actual] = torch.arange(actual)
+
+    # Token type ids: zero tensor if not provided
+    if token_type_ids is None:
+        tt_ids = torch.zeros((bsz, padded_len), dtype=torch.long)
+    else:
+        tt_pad = padded_len - token_type_ids.shape[1]
+        tt_ids = (
+            F.pad(token_type_ids, (0, tt_pad), value=0)
+            if tt_pad > 0
+            else token_type_ids
+        )
+
+    # Bidirectional mask: real tokens attend to all other real tokens
+    mask = build_prefill_mask_right_padded(
+        bsz, padded_len, actual_lengths, is_causal=False
+    )
+
+    h = run_encoder_forward_fn(
+        model,
+        input_ids.to(DEVICE),
+        mask.to(DEVICE),
+        position_ids.to(DEVICE),
+        tt_ids.to(DEVICE),
+    )
+
+    # Crop the block-pad back off
     h = h[:, :seq_len, :]
     return h, attention_mask
