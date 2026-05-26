@@ -81,9 +81,11 @@ class PrecomputedRotaryEmbedding(nn.Module):
             return
         target_len = max(max_len, self._cached_len * 2, 2048)
         inv_freq = self.original.inv_freq.to("cpu").float()
-        rope_half = inv_freq.shape[0]
-        t = torch.arange(target_len, dtype=inv_freq.dtype)
-        freqs = torch.outer(t, inv_freq).float()  # [S, rope_half]
+        rope_half = inv_freq.shape[0]  # type: ignore[index]
+        t = torch.arange(target_len, dtype=inv_freq.dtype)  # type: ignore[arg-type]
+        freqs = torch.outer(
+            t, inv_freq  # type: ignore[arg-type]
+        ).float()  # [S, rope_half] # type: ignore[arg-type]
         scaling = getattr(self.original, "attention_scaling", 1.0)
         rot = torch.stack(
             [
@@ -93,13 +95,15 @@ class PrecomputedRotaryEmbedding(nn.Module):
                 torch.cos(freqs) * scaling,
             ],
             dim=1,
-        ).view(target_len, 2, 2, rope_half)
+        ).view(
+            target_len, 2, 2, rope_half  # type: ignore[arg-type]
+        )  # type: ignore[arg-type]
 
         if self.padded_head_dim is not None:
             padded_half = self.padded_head_dim // 2
             if padded_half > rope_half:
                 pad_half = padded_half - rope_half
-                ident = torch.zeros(target_len, 2, 2, pad_half)
+                ident = torch.zeros(target_len, 2, 2, pad_half)  # type: ignore[arg-type]
                 ident[:, 0, 0, :] = 1.0
                 ident[:, 1, 1, :] = 1.0
                 rot = torch.cat([rot, ident], dim=-1)
@@ -620,7 +624,7 @@ def _move_to_spyre_with_layout(model, dtype):
     # device_layout kwarg fail kwarg validation before dispatch.
     torch.empty(1, device=DEVICE)
 
-    from torch_spyre._C import SpyreTensorLayout
+    from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
 
     skip_layout_ptrs = _embedding_param_ids(model)
 
@@ -629,7 +633,7 @@ def _move_to_spyre_with_layout(model, dtype):
             stl = SpyreTensorLayout(t.shape, t.stride(), dtype, [1, 0])
         else:
             stl = None
-        new = torch.empty(
+        new: torch.Tensor = torch.empty(  # type: ignore[call-overload]
             t.shape,
             device=torch.device(DEVICE),
             device_layout=stl,
@@ -835,7 +839,7 @@ def generate(
                 logits = run_forward_fn(
                     model,
                     next_input,
-                    decode_pos.to(DEVICE),
+                    decode_pos.to(DEVICE),  # type: ignore[union-attr]
                     fill_mask_device,
                     key_caches,
                     value_caches,
@@ -849,7 +853,7 @@ def generate(
 
             else:
                 current_cache_len += BLOCK_SIZE
-                decode_pos = decode_pos + BLOCK_SIZE
+                decode_pos = decode_pos + BLOCK_SIZE  # type: ignore[assignment, operator]
                 exp_mask = build_expansion_mask(
                     batch_size,
                     BLOCK_SIZE,
@@ -860,7 +864,7 @@ def generate(
                 logits = run_forward_fn(
                     model,
                     next_input,
-                    decode_pos.to(DEVICE),
+                    decode_pos.to(DEVICE),  # type: ignore[union-attr]
                     exp_mask.to(DEVICE),
                     key_caches,
                     value_caches,
@@ -915,16 +919,16 @@ def generate(
     # layout starting at padded_len.
     results = []
     for b in range(batch_size):
-        gen_ids = []
+        gen_ids_list = []
         block_start = padded_len
         remaining = num_generated[b].item()
         while remaining > 0:
             take = min(remaining, BLOCK_SIZE)
-            for j in range(take):
-                gen_ids.append(result[b, block_start + j].item())
+            for j in range(take):  # type: ignore[arg-type]
+                gen_ids_list.append(result[b, block_start + j].item())
             remaining -= take
             block_start += BLOCK_SIZE
-        gen_ids = torch.tensor(gen_ids)
+        gen_ids = torch.tensor(gen_ids_list)
         if eos_token_id is not None:
             eos_pos = (gen_ids == eos_token_id).nonzero(as_tuple=True)[0]
             if len(eos_pos) > 0:
