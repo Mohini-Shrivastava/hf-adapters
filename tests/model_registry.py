@@ -140,28 +140,34 @@ EMBEDDING_MODELS = {
 }
 
 
-def _get_adapter_module_name(adapter_module):
+def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]
 
 
-def _select_representative_models():
+def _select_representative_models(config_mapping=None):
     """
     Programmatically select one representative model per adapter module.
 
     Analyzes CONFIG_TO_ADAPTER_MODULE_MAPPING and selects one model per adapter
     from the registries above. Prefers smaller models for faster test execution.
 
+    Args:
+        config_mapping: Optional CONFIG_TO_ADAPTER_MODULE_MAPPING to use.
+                       If None, will be imported from hf_adapters.auto_spyre_model.
+
     Returns:
         tuple: (causal_keys, embed_keys) where each is a list of model keys
     """
     # Import here to avoid issues with conftest.py patching
-    from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
+    if config_mapping is None:
+        from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
+
+        config_mapping = CONFIG_TO_ADAPTER_MODULE_MAPPING
 
     # Get set of adapter module names from CONFIG_TO_ADAPTER_MODULE_MAPPING
     adapter_modules_in_config = {
-        _get_adapter_module_name(adapter_mod)
-        for adapter_mod in CONFIG_TO_ADAPTER_MODULE_MAPPING.values()
+        _get_adapter_module_name(adapter_mod) for adapter_mod in config_mapping.values()
     }
 
     # Map adapter module names to model keys
@@ -217,7 +223,9 @@ def _select_representative_models():
     return causal_keys, embed_keys
 
 
-# Generate the representative model lists programmatically
-CAUSAL_KEYS, EMBED_KEYS = _select_representative_models()
+# Defer initialization until after conftest.py has patched hf_adapters
+# These will be populated by conftest.py after it sets up the patched modules
+CAUSAL_KEYS = []
+EMBED_KEYS = []
 
 # Made with Bob

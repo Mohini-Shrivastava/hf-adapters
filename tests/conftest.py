@@ -33,7 +33,6 @@ import os
 import sys
 import types
 
-import model_registry  # Import module, not specific names yet
 import pytest
 from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest import ...`)
     cosine_per_row,
@@ -93,17 +92,14 @@ _auto_spec.loader.exec_module(_auto_mod)
 setattr(_pkg, "auto_spyre_model", _auto_mod)
 
 # Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
+# Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
+import model_registry  # noqa: E402
+
 model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
     model_registry._select_representative_models(
         _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
 )
-
-# Re-export for convenience
-CAUSAL_LM_MODELS = model_registry.CAUSAL_LM_MODELS
-EMBEDDING_MODELS = model_registry.EMBEDDING_MODELS
-CAUSAL_KEYS = model_registry.CAUSAL_KEYS  # noqa: F401
-EMBED_KEYS = model_registry.EMBED_KEYS  # noqa: F401
 
 
 def _unwrap_compiled_blocks(model):

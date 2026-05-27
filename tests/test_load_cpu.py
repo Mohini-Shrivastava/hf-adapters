@@ -27,8 +27,8 @@ DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``.
 import gc
 
 import pytest
-from conftest import CAUSAL_LM_MODELS, EMBEDDING_MODELS, torch_dtype_for
-from model_registry import CAUSAL_KEYS, EMBED_KEYS
+from conftest import torch_dtype_for
+from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS, EMBED_KEYS, EMBEDDING_MODELS
 
 
 @pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
