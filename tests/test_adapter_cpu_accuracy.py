@@ -35,8 +35,8 @@ import gc
 
 import pytest
 import torch
-from conftest import CAUSAL_LM_MODELS as MODELS
 from conftest import load_hf_causal_lm, torch_dtype_for
+from model_registry import CAUSAL_LM_MODELS as MODELS
 from transformers import AutoTokenizer
 
 PROMPT = "The capital of France is"
