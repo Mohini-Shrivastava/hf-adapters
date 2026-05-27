@@ -28,12 +28,6 @@ import sys
 import time
 import traceback
 
-# Registries are duplicated here on purpose: this script runs on the Spyre pod
-# as a standalone ``python3`` invocation, not under pytest, so ``tests/conftest.py``
-# (which holds the shared ``CAUSAL_LM_MODELS`` / ``EMBEDDING_MODELS``) is never
-# imported. Keep these in sync with conftest when models are added or paths
-# change. Same convention as ``test_e2e_smoke_spyre.py`` and the other
-# ``*_spyre.py`` scripts.
 CAUSAL_LM_MODELS = {
     "qwen3": "Qwen/Qwen3-0.6B",
     "qwen2": "Qwen/Qwen2.5-1.5B",
