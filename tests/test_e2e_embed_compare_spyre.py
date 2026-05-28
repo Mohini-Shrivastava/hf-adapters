@@ -27,7 +27,7 @@ Mixed lengths exercise:
 - ``prefill_encoder``'s pad-to-BLOCK_SIZE + crop-back logic.
 
 Usage (on Spyre pod):
-    python3 tests/test_e2e_embed_compare_spyre.py [bge-base|minilm]
+    python3 tests/test_e2e_embed_compare_spyre.py [bge-base|minilm|qwen3_embed]
 """
 
 import importlib
@@ -36,27 +36,16 @@ import traceback
 
 import torch
 import torch.nn.functional as F
+from model_registry import EMBEDDING_MODELS
 
 from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
+    prefill_embed,
     prefill_encoder,
 )
 
 DEVICE = "spyre"
-
-MODEL_REGISTRY = {
-    "bge-base": {
-        "name": "BGE-base-en-v1.5",
-        "path": "BAAI/bge-base-en-v1.5",
-        "adapter": "hf_adapters.hf_bert",
-    },
-    "minilm": {
-        "name": "all-MiniLM-L6-v2",
-        "path": "sentence-transformers/all-MiniLM-L6-v2",
-        "adapter": "hf_adapters.hf_bert",
-    },
-}
 
 # Mixed-length prompts: short / medium / long. Forces a non-trivial padding
 # pattern in the right-padded mask so that a broken bidirectional SDPA path
@@ -98,12 +87,20 @@ def hf_reference_forward(model, input_ids, attention_mask):
 def adapter_forward(adapter, model, input_ids, attention_mask):
     """Run adapter prefill on Spyre; return last_hidden_state on CPU."""
     with torch.no_grad():
-        h_dev, _ = prefill_encoder(
-            adapter._run_backbone_forward,
-            model,
-            input_ids,
-            attention_mask,
-        )
+        if getattr(adapter, "_is_encoder_only", False):
+            h_dev, _ = prefill_encoder(
+                adapter._run_backbone_forward,
+                model,
+                input_ids,
+                attention_mask,
+            )
+        else:
+            h_dev, _ = prefill_embed(
+                adapter._run_backbone_forward,
+                model,
+                input_ids,
+                attention_mask,
+            )
     return h_dev.to("cpu")  # [B, L, H]
 
 
@@ -166,8 +163,11 @@ def run_model_test(model_key):
     """Full comparison for one encoder model."""
     from transformers import AutoModel, AutoTokenizer
 
-    info = MODEL_REGISTRY[model_key]
-    adapter = importlib.import_module(info["adapter"])
+    info = EMBEDDING_MODELS[model_key]
+    # Convert e.g., "hf_qwen3.py" to "hf_adapters.hf_qwen3"
+    adapter_module_name = info["adapter"].replace(".py", "")
+    adapter_module_path = f"hf_adapters.{adapter_module_name}"
+    adapter = importlib.import_module(adapter_module_path)
 
     print(f"\n{'='*70}")
     print(f"  {info['name']}: {info['path']}")
@@ -245,18 +245,18 @@ def print_table(all_rows):
 
 
 if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else list(MODEL_REGISTRY.keys())
+    which = sys.argv[1:] if len(sys.argv) > 1 else list(EMBEDDING_MODELS.keys())
 
     all_rows = []
     for key in which:
-        if key not in MODEL_REGISTRY:
-            print(f"Unknown: {key}. Options: {list(MODEL_REGISTRY.keys())}")
+        if key not in EMBEDDING_MODELS:
+            print(f"Unknown: {key}. Options: {list(EMBEDDING_MODELS.keys())}")
             continue
         try:
             rows = run_model_test(key)
             all_rows.extend(rows)
         except Exception:
-            print(f"\n!!! {MODEL_REGISTRY[key]['name']} FAILED:")
+            print(f"\n!!! {EMBEDDING_MODELS[key]['name']} FAILED:")
             traceback.print_exc()
 
     if all_rows:
