@@ -1126,6 +1126,104 @@ def standard_gqa_forward(
 # ---------------------------------------------------------------------------
 
 
+def fairseq_position_ids(input_ids: torch.Tensor, padding_idx: int) -> torch.Tensor:
+    """fairseq-style positions: real tokens start at ``padding_idx + 1``.
+
+    Mirrors ``create_position_ids_from_input_ids`` in modeling_xlm_roberta /
+    modeling_mpnet so the position_embeddings lookup matches stock HF exactly.
+    Padding slots map to ``padding_idx``; the attention mask zeros them out
+    later, so the embedding picked there is irrelevant.
+
+    Computed on CPU even when ``input_ids`` lives on Spyre: the natural form
+    ``input_ids.ne(padding_idx).int()`` materializes a bool tensor and the
+    Spyre Inductor backend rejects ``bool → int32`` conversions. The CPU
+    round-trip on a ``[B, L]`` int tensor is negligible.
+    """
+    ids_cpu = input_ids.to("cpu")
+    mask = ids_cpu.ne(padding_idx).int()
+    incremental = torch.cumsum(mask, dim=1).type_as(mask) * mask
+    return (incremental.long() + padding_idx).to(DEVICE)
+
+
+def make_encoder_block(
+    *,
+    attn_module,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    attn_ln,
+    ffn_in,
+    act,
+    ffn_out,
+    out_ln,
+    num_heads,
+    head_dim,
+):
+    """Compile a bidirectional encoder block (MHA + post-LN + FFN + post-LN).
+
+    Shared by ``hf_bert`` and ``hf_mpnet``. The two architectures differ only
+    in *where* their projection / LN modules live (e.g. BERT's
+    ``attention.self.query`` vs MPNet's ``attention.attn.q``); the compiled
+    forward body is identical, so adapters resolve the modules and pass them
+    in by keyword.
+
+    Block signature (no KV cache, no RoPE):
+
+        block_forward(hidden_states, attn_mask) -> hidden_states
+
+    ``attn_module`` is the model's attention submodule (``attention.self`` for
+    BERT-style, ``attention.attn`` for MPNet-style). It's read for
+    ``_spyre_orig_head_dim`` — the marker ``pad_attention_heads_simple`` sets
+    when it pads. When present, SDPA scales by ``1/sqrt(orig)`` instead of the
+    default ``1/sqrt(padded)`` so the unpadded entries get the correct scale.
+
+    Dropout is skipped — these adapters are eval-only.
+    """
+    sdpa_scale = getattr(attn_module, "_spyre_orig_head_dim", head_dim) ** -0.5
+
+    def block_forward(hidden_states, attn_mask):
+        bsz, seq_len, _ = hidden_states.shape
+
+        q = (
+            q_proj(hidden_states)
+            .view(bsz, seq_len, num_heads, head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            k_proj(hidden_states)
+            .view(bsz, seq_len, num_heads, head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            v_proj(hidden_states)
+            .view(bsz, seq_len, num_heads, head_dim)
+            .transpose(1, 2)
+        )
+
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=sdpa_scale,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+
+        attn_out = o_proj(attn_out)
+        hidden_states = attn_ln(attn_out + hidden_states)
+
+        ffn_h = act(ffn_in(hidden_states))
+        ffn_h = ffn_out(ffn_h)
+        hidden_states = out_ln(ffn_h + hidden_states)
+
+        return hidden_states
+
+    return torch.compile(block_forward, dynamic=False)
+
+
 def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
 

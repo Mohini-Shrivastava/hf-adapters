@@ -44,96 +44,37 @@ Usage::
     )
 """
 
-import torch
-import torch.nn.functional as F
-
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     encoder_backbone_forward,
     get_backbone,
+    make_encoder_block,
     pad_attention_heads_simple,
 )
 
 
 def _make_compiled_encoder_block(layer):
-    """Compiled block for BERT: bidirectional MHA + post-LN + FFN + post-LN.
+    """Resolve BERT's module layout and hand off to ``make_encoder_block``.
 
-    Block signature (forked from the decoder contract — no KV cache, no RoPE):
-
-        block_forward(hidden_states, attn_mask) -> hidden_states
-
-    Closes over the layer's weight modules so that torch.compile sees a
-    static graph with no Python-level attribute lookups at inference time.
-
-    Dropout layers are skipped — this adapter is eval-only.
+    BERT splits attention across ``attention.self`` (Q/K/V) and
+    ``attention.output`` (O + post-attn LN); the compiled body itself is
+    shared with MPNet via ``make_encoder_block``.
     """
     attn_self = layer.attention.self
-    # q / k / v are named "query", "key", "value" in BertSelfAttention
-    q_proj = attn_self.query  # nn.Linear(H, H), bias=True
-    k_proj = attn_self.key
-    v_proj = attn_self.value
-    num_heads = attn_self.num_attention_heads
-    head_dim = attn_self.attention_head_size
-    # When pad_attention_heads_simple was applied, head_dim is the padded
-    # value but Q·K^T only sums over the original non-zero entries; we must
-    # scale by 1/sqrt(orig). Otherwise SDPA's default 1/sqrt(head_dim) is
-    # already correct.
-    orig_head_dim = getattr(attn_self, "_spyre_orig_head_dim", head_dim)
-    sdpa_scale = orig_head_dim**-0.5
-
-    o_proj = layer.attention.output.dense
-    attn_ln = layer.attention.output.LayerNorm
-
-    ffn_in = layer.intermediate.dense
-    act = layer.intermediate.intermediate_act_fn
-
-    ffn_out = layer.output.dense
-    out_ln = layer.output.LayerNorm
-
-    def block_forward(hidden_states, attn_mask):
-        bsz, seq_len, _ = hidden_states.shape
-
-        # Self-attention
-        q = (
-            q_proj(hidden_states)
-            .view(bsz, seq_len, num_heads, head_dim)
-            .transpose(1, 2)
-        )
-        k = (
-            k_proj(hidden_states)
-            .view(bsz, seq_len, num_heads, head_dim)
-            .transpose(1, 2)
-        )
-        v = (
-            v_proj(hidden_states)
-            .view(bsz, seq_len, num_heads, head_dim)
-            .transpose(1, 2)
-        )
-
-        # No RoPE. No KV cache. Bidirectional: is_causal=False.
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=sdpa_scale,
-        )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-
-        # Post-attention: project + residual + LN  (BertSelfOutput pattern)
-        attn_out = o_proj(attn_out)
-        hidden_states = attn_ln(attn_out + hidden_states)
-
-        # FFN: intermediate dense + activation + output dense + residual + LN
-        ffn_h = act(ffn_in(hidden_states))
-        ffn_h = ffn_out(ffn_h)
-        hidden_states = out_ln(ffn_h + hidden_states)
-
-        return hidden_states
-
-    return torch.compile(block_forward, dynamic=False)
+    return make_encoder_block(
+        attn_module=attn_self,
+        q_proj=attn_self.query,
+        k_proj=attn_self.key,
+        v_proj=attn_self.value,
+        o_proj=layer.attention.output.dense,
+        attn_ln=layer.attention.output.LayerNorm,
+        ffn_in=layer.intermediate.dense,
+        act=layer.intermediate.intermediate_act_fn,
+        ffn_out=layer.output.dense,
+        out_ln=layer.output.LayerNorm,
+        num_heads=attn_self.num_attention_heads,
+        head_dim=attn_self.attention_head_size,
+    )
 
 
 _run_backbone_forward = encoder_backbone_forward

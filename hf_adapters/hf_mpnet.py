@@ -39,112 +39,39 @@ Differences from BERT (``hf_bert``) honored here:
 import math
 
 import torch
-import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    fairseq_position_ids,
     get_backbone,
+    make_encoder_block,
 )
 
 
 def _make_compiled_encoder_block(layer):
-    """Compiled block for MPNet: bidirectional MHA + post-LN + FFN + post-LN.
+    """Resolve MPNet's module layout and hand off to ``make_encoder_block``.
 
-    Block signature (matches BERT — no KV cache, no RoPE):
-
-        block_forward(hidden_states, attn_mask) -> hidden_states
-
-    The relative position bias is folded into ``attn_mask`` by the caller
-    (see ``_run_backbone_forward``), so the compiled graph is identical in
-    shape to BERT's. Closes over the layer's weight modules so torch.compile
-    sees a static graph with no Python-level attribute lookups at inference.
-
-    Dropout layers are skipped — this adapter is eval-only.
+    MPNet groups attention under ``attention.attn.{q,k,v,o}`` with the post-
+    attention LN at ``attention.LayerNorm`` (no ``output`` submodule). The
+    relative position bias is folded into ``attn_mask`` by the caller (see
+    ``_run_backbone_forward``), so the compiled body is identical to BERT's.
     """
     attn = layer.attention.attn
-    q_proj = attn.q
-    k_proj = attn.k
-    v_proj = attn.v
-    o_proj = attn.o
-    num_heads = attn.num_attention_heads
-    head_dim = attn.attention_head_size
-    # When pad_attention_heads_simple was applied, head_dim is the padded
-    # value but Q·K^T only sums over the original non-zero entries; we must
-    # scale by 1/sqrt(orig). Otherwise SDPA's default 1/sqrt(head_dim) is
-    # already correct.
-    orig_head_dim = getattr(attn, "_spyre_orig_head_dim", head_dim)
-    sdpa_scale = orig_head_dim**-0.5
-
-    attn_ln = layer.attention.LayerNorm
-
-    ffn_in = layer.intermediate.dense
-    act = layer.intermediate.intermediate_act_fn
-
-    ffn_out = layer.output.dense
-    out_ln = layer.output.LayerNorm
-
-    def block_forward(hidden_states, attn_mask):
-        bsz, seq_len, _ = hidden_states.shape
-
-        # Self-attention
-        q = (
-            q_proj(hidden_states)
-            .view(bsz, seq_len, num_heads, head_dim)
-            .transpose(1, 2)
-        )
-        k = (
-            k_proj(hidden_states)
-            .view(bsz, seq_len, num_heads, head_dim)
-            .transpose(1, 2)
-        )
-        v = (
-            v_proj(hidden_states)
-            .view(bsz, seq_len, num_heads, head_dim)
-            .transpose(1, 2)
-        )
-
-        # ``attn_mask`` already includes the relative position bias added to
-        # the additive padding mask. Bidirectional: is_causal=False.
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=sdpa_scale,
-        )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-
-        # Post-attention: project + residual + LN  (MPNetAttention pattern;
-        # note: HF applies dropout to attn_out before residual — we drop it
-        # since this adapter is eval-only).
-        attn_out = o_proj(attn_out)
-        hidden_states = attn_ln(attn_out + hidden_states)
-
-        # FFN: intermediate dense + activation + output dense + residual + LN
-        ffn_h = act(ffn_in(hidden_states))
-        ffn_h = ffn_out(ffn_h)
-        hidden_states = out_ln(ffn_h + hidden_states)
-
-        return hidden_states
-
-    return torch.compile(block_forward, dynamic=False)
-
-
-def _mpnet_position_ids(input_ids: torch.Tensor, padding_idx: int) -> torch.Tensor:
-    """fairseq-style positions, same as XLM-R: real tokens start at padding_idx+1.
-
-    Mirrors ``create_position_ids_from_input_ids`` in ``modeling_mpnet``.
-    Computed on CPU even when ``input_ids`` lives on Spyre (the natural
-    bool→int conversion is rejected by the Spyre Inductor backend); the
-    round-trip on a ``[B, L]`` int tensor is negligible.
-    """
-    ids_cpu = input_ids.to("cpu")
-    mask = ids_cpu.ne(padding_idx).int()
-    incremental = torch.cumsum(mask, dim=1).type_as(mask) * mask
-    return (incremental.long() + padding_idx).to(DEVICE)
+    return make_encoder_block(
+        attn_module=attn,
+        q_proj=attn.q,
+        k_proj=attn.k,
+        v_proj=attn.v,
+        o_proj=attn.o,
+        attn_ln=layer.attention.LayerNorm,
+        ffn_in=layer.intermediate.dense,
+        act=layer.intermediate.intermediate_act_fn,
+        ffn_out=layer.output.dense,
+        out_ln=layer.output.LayerNorm,
+        num_heads=attn.num_attention_heads,
+        head_dim=attn.attention_head_size,
+    )
 
 
 def _relative_position_bucket(
@@ -219,7 +146,7 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     backbone = get_backbone(model)
     emb = backbone.embeddings
 
-    pos_ids = _mpnet_position_ids(input_ids, emb.padding_idx)
+    pos_ids = fairseq_position_ids(input_ids, emb.padding_idx)
 
     h = emb.word_embeddings(input_ids) + emb.position_embeddings(pos_ids)
     h = emb.LayerNorm(h)

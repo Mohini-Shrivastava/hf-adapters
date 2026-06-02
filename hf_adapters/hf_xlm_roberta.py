@@ -31,36 +31,13 @@ differences from BERT must be honored in the embedding step:
   BERT's three-way add). Mathematically equivalent — same final tensor.
 """
 
-import torch
-
 from hf_adapters.hf_bert import _make_compiled_encoder_block
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
-    DEVICE,
+    fairseq_position_ids,
     get_backbone,
     pad_attention_heads_simple,
 )
-
-
-def _xlm_roberta_position_ids(
-    input_ids: torch.Tensor, padding_idx: int
-) -> torch.Tensor:
-    """fairseq-style positions: real tokens start at padding_idx + 1.
-
-    Mirrors ``XLMRobertaEmbeddings.create_position_ids_from_input_ids`` so the
-    position_embeddings lookup matches stock HF exactly. Padding slots map to
-    ``padding_idx`` (e.g. 1 for bge-m3); the attention mask zeros them out
-    later, so the embedding picked there is irrelevant.
-
-    Computed on CPU even when ``input_ids`` lives on Spyre: the natural form
-    ``input_ids.ne(padding_idx).int()`` materializes a bool tensor and the
-    Spyre Inductor backend rejects ``bool → int32`` conversions. The CPU
-    round-trip on a ``[B, L]`` int tensor is negligible.
-    """
-    ids_cpu = input_ids.to("cpu")
-    mask = ids_cpu.ne(padding_idx).int()
-    incremental = torch.cumsum(mask, dim=1).type_as(mask) * mask
-    return (incremental.long() + padding_idx).to(DEVICE)
 
 
 def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
@@ -76,7 +53,7 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     backbone = get_backbone(model)
     emb = backbone.embeddings
 
-    pos_ids = _xlm_roberta_position_ids(input_ids, emb.padding_idx)
+    pos_ids = fairseq_position_ids(input_ids, emb.padding_idx)
 
     h = (
         emb.word_embeddings(input_ids)
