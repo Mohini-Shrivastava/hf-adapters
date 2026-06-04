@@ -806,6 +806,13 @@ def generate(
 ):
     """Model-agnostic generation with padded 64-block decode.
 
+    When attached to a model via ``auto_spyre_model.py`` (which binds
+    ``run_forward_fn`` to the adapter module's ``_run_forward``), the
+    ``run_forward_fn`` parameter drops out of the public signature, so callers
+    invoke it as::
+
+        model.generate(tokenizer, ["Hello!"], max_new_tokens=32, **kwargs)
+
     Sampling and stop parameters follow stock-HF precedence:
     ``explicit kwarg > model.generation_config > HF global default``. Leaving a
     sampling knob at ``None`` (the default for ``do_sample``/``temperature``/

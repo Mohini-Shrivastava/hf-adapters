@@ -52,6 +52,8 @@ print(outputs[0])
 
 The `AutoSpyreModelForCausalLM` class automatically selects the correct adapter module based on the model's config type.
 
+Note that `model.generate()` is a modified version of the stock HF `generate()` method, with a different signature and functionality (See [docs/generate_vs_stock_hf.md](docs/generate_vs_stock_hf.md)).
+
 ## Embedding Models
 
 For embedding models, use the `sentence-transformers` library with the `backend="spyre"` parameter:
