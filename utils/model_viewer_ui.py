@@ -60,6 +60,9 @@ def _parse_config_to_module_map() -> Dict[str, str]:
 CONFIG_CLASS_TO_MODULE = _parse_config_to_module_map()
 
 
+_UNSET = object()
+
+
 @dataclass
 class FilterState:
     """Immutable filter state to prevent race conditions."""
@@ -115,11 +118,17 @@ class ModelDataViewer:
     def update_filter_state(
         self,
         filters: Optional[Dict[str, List[str]]] = None,
-        params_min: Any = None,
-        params_max: Any = None,
+        params_min: Any = _UNSET,
+        params_max: Any = _UNSET,
         _clear: bool = False,
     ) -> FilterState:
-        """Thread-safe update of filter state. Returns new state."""
+        """Thread-safe update of filter state. Returns new state.
+
+        params_min / params_max use the _UNSET sentinel so that explicitly
+        passing None (e.g. when the user clears the Min/Max number input)
+        actually clears the bound — using None as the "not provided" marker
+        would silently drop clear operations.
+        """
         with self._state_lock:
             if _clear:
                 self._filter_state = FilterState()
@@ -129,10 +138,10 @@ class ModelDataViewer:
                 if filters is not None:
                     new_state.filters = {k: v.copy() for k, v in filters.items()}
 
-                if params_min is not None:
+                if params_min is not _UNSET:
                     new_state.params_min = params_min
 
-                if params_max is not None:
+                if params_max is not _UNSET:
                     new_state.params_max = params_max
 
                 self._filter_state = new_state
@@ -247,9 +256,6 @@ class ModelDataViewer:
                 model_type = "Unknown"
             stats[model_type] = stats.get(model_type, 0) + 1
         return dict(sorted(stats.items(), key=lambda x: x[1], reverse=True))
-
-
-_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -603,8 +609,8 @@ def create_filter_panel_lazy(
         asyncio.create_task(debounced_refresh())
 
     def update_params_range(min_b: Any, max_b: Any) -> None:
-        params_min = None
-        params_max = None
+        params_min: Any = _UNSET
+        params_max: Any = _UNSET
 
         if min_b is not _UNSET:
             params_min = float(min_b) * 1e9 if min_b not in (None, "") else None
