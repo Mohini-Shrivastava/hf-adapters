@@ -651,15 +651,31 @@ def create_filter_panel_lazy(
                     ]
                     if default:
                         viewer.filters[field] = default
-                    ui.select(
-                        label=label,
-                        options=options,
-                        value=default or None,
-                        multiple=True,
-                        clearable=True,
-                        with_input=True,
-                        on_change=lambda e, f=field: update_filter(f, e.value),
-                    ).classes("w-full").props("use-chips")
+
+                    def _on_change(e, f=field, sel=None):
+                        update_filter(f, e.value)
+                        # Clear the typed search text after each selection so the
+                        # input doesn't keep stale fragments like "openb"
+                        # alongside the selected chip "openba". This calls the
+                        # underlying Quasar QSelect.updateInputValue() method.
+                        if sel is not None:
+                            sel.run_method("updateInputValue", "", True)
+
+                    select = (
+                        ui.select(
+                            label=label,
+                            options=options,
+                            value=default or None,
+                            multiple=True,
+                            clearable=True,
+                            with_input=True,
+                        )
+                        .classes("w-full")
+                        .props("use-chips")
+                    )
+                    select.on_value_change(
+                        lambda e, f=field, sel=select: _on_change(e, f, sel)
+                    )
 
             # Numeric range filter on parameters (in billions, B)
             with ui.row().classes("items-center gap-2 w-full"):
