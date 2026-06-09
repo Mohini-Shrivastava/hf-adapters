@@ -647,6 +647,13 @@ def create_filter_panel_lazy(
                 "is_moe": ["False"],
             }
 
+            # Accumulate defaults and push them to the viewer's filter state
+            # in one shot. Assigning to `viewer.filters[...]` does NOT work —
+            # the `filters` property returns a copy, so per-field assignments
+            # mutate a throwaway dict and the initial refresh would run with
+            # no filters applied (e.g. MoE=True models would still appear).
+            initial_filters: Dict[str, List[str]] = {}
+
             for field, label in filter_fields:
                 options = list(viewer.unique_values.get(field, []))
                 if options:
@@ -654,7 +661,7 @@ def create_filter_panel_lazy(
                         v for v in default_filters.get(field, []) if v in options
                     ]
                     if default:
-                        viewer.filters[field] = default
+                        initial_filters[field] = default
 
                     # Boolean-only fields (True/False) get a single-select with
                     # a "no selection means show all" semantics — multi-select
@@ -719,6 +726,12 @@ def create_filter_panel_lazy(
                     format="%.2f",
                     on_change=lambda e: update_params_range(_UNSET, e.value),
                 ).classes("flex-1").props("clearable")
+
+        # Commit accumulated default filter selections to the shared filter
+        # state so the initial render honors them (the per-widget default=
+        # only seeds the UI control's displayed value).
+        if initial_filters:
+            viewer.update_filter_state(filters=initial_filters)
 
         with ui.row().classes("gap-2 mt-2"):
             ui.button("Clear All Filters", on_click=clear_filters).props(
