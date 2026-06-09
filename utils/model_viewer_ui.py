@@ -245,22 +245,71 @@ class ModelDataViewer:
         return dict(sorted(stats.items(), key=lambda x: x[1], reverse=True))
 
 
-CSV_PATH: Path = RESOURCES_DIR / "top_generative_models.csv"
-
 _UNSET = object()
 
 
-def create_stats_card(stats: Dict[str, Any]):
+@dataclass(frozen=True)
+class ViewMode:
+    """Visual + data configuration for a viewer mode."""
+
+    key: str
+    label: str
+    icon: str
+    csv_path: Path
+    header_gradient: str
+    accent: str  # tailwind color name, e.g. "blue", "teal"
+    extra_filters: tuple = ()  # extra (field, label) tuples appended to filter panel
+    extra_columns: tuple = ()  # extra column configs appended to table
+
+
+GENERATIVE_MODE = ViewMode(
+    key="generative",
+    label="Generative Models",
+    icon="🤗",
+    csv_path=RESOURCES_DIR / "top_generative_models.csv",
+    header_gradient="bg-gradient-to-r from-blue-600 to-purple-600",
+    accent="blue",
+)
+
+EMBEDDING_MODE = ViewMode(
+    key="embedding",
+    label="Embedding Models",
+    icon="🧬",
+    csv_path=RESOURCES_DIR / "top_embedding_models.csv",
+    header_gradient="bg-gradient-to-r from-teal-600 to-emerald-600",
+    accent="teal",
+    extra_filters=(("is_multimodal", "Multimodal"),),
+    extra_columns=(
+        {
+            "name": "is_multimodal",
+            "label": "Multimodal",
+            "field": "is_multimodal",
+            "sortable": True,
+            "align": "center",
+        },
+    ),
+)
+
+MODES: Dict[str, ViewMode] = {
+    GENERATIVE_MODE.key: GENERATIVE_MODE,
+    EMBEDDING_MODE.key: EMBEDDING_MODE,
+}
+
+
+def create_stats_card(stats: Dict[str, Any], mode: ViewMode):
     """Create a statistics card showing coverage info."""
+    accent = mode.accent
     with ui.card().classes("w-full mb-4"):
-        ui.label("📊 Coverage Statistics").classes("text-2xl font-bold mb-2")
+        ui.label(f"📊 {mode.label} — Coverage Statistics").classes(
+            "text-2xl font-bold mb-2"
+        )
 
         with ui.row().classes("w-full gap-4"):
-            # Total models card
-            with ui.card().classes("flex-1 bg-blue-100"):
+            # Total models card — uses the mode accent color
+            with ui.card().classes(f"flex-1 bg-{accent}-100"):
                 ui.label("Total Models").classes("text-sm text-gray-600")
                 ui.label(str(stats["total"])).classes(
-                    "text-3xl font-bold text-blue-600"
+                    f"text-3xl font-bold text-{accent}-600"
                 )
 
             # Supported models card
@@ -308,7 +357,7 @@ def create_model_type_chart(type_stats: Dict[str, int]):
                         ui.label(str(count)).classes("text-sm font-bold")
 
 
-def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
+def create_data_table(data: List[Dict[str, Any]], columns: List[str], mode: ViewMode):
     """Create an interactive data table."""
     if not data:
         ui.label("No data to display").classes("text-gray-500 text-center p-4")
@@ -409,6 +458,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
             "align": "center",
         },
     ]
+    column_configs.extend(mode.extra_columns)
 
     # Format data for table
     rows = []
@@ -425,6 +475,8 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
                 # Add color coding for supported status
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_moe":
+                formatted_row[col] = "✅" if value.lower() == "true" else "❌"
+            elif col == "is_multimodal":
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_gated":
                 formatted_row[col] = "🔒" if value.lower() == "true" else "🆓"
@@ -480,7 +532,9 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
     )
 
 
-async def refresh_display_async(viewer: ModelDataViewer, content_container) -> None:
+async def refresh_display_async(
+    viewer: ModelDataViewer, content_container, mode: ViewMode
+) -> None:
     """Async refresh with proper state handling."""
     if content_container is None:
         return
@@ -494,7 +548,7 @@ async def refresh_display_async(viewer: ModelDataViewer, content_container) -> N
     with content_container:
         # Statistics
         stats = viewer.get_coverage_stats(filtered_data)
-        create_stats_card(stats)
+        create_stats_card(stats, mode)
 
         # Model type distribution
         # type_stats = viewer.get_model_type_stats(filtered_data)
@@ -502,18 +556,21 @@ async def refresh_display_async(viewer: ModelDataViewer, content_container) -> N
 
         # Data table
         with ui.card().classes("w-full"):
-            ui.label(f"📋 Models Table ({len(filtered_data)} models)").classes(
+            ui.label(f"📋 {mode.label} Table ({len(filtered_data)} models)").classes(
                 "text-xl font-bold mb-2"
             )
-            create_data_table(filtered_data, viewer.columns)
+            create_data_table(filtered_data, viewer.columns, mode)
 
 
-def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> None:
+def create_filter_panel_lazy(
+    viewer: ModelDataViewer, get_content_container, mode: ViewMode
+) -> None:
     """Create the filter panel with debounced refresh.
 
     Args:
         viewer: The ModelDataViewer instance
         get_content_container: A callable that returns the content container
+        mode: The active ViewMode (controls extra filters and labels)
     """
 
     async def debounced_refresh():
@@ -531,7 +588,7 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
             await asyncio.sleep(viewer._refresh_delay)
             container = get_content_container()
             if container is not None:
-                await refresh_display_async(viewer, container)
+                await refresh_display_async(viewer, container, mode)
 
         viewer._refresh_task = asyncio.create_task(delayed_refresh())
 
@@ -557,8 +614,10 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
         viewer.clear_filters()
         asyncio.create_task(debounced_refresh())
 
-    with ui.card().classes("w-full mb-4"):
-        ui.label("🔍 Filters").classes("text-xl font-bold mb-2")
+    with ui.card().classes(f"w-full mb-4 border-l-4 border-{mode.accent}-500"):
+        ui.label(f"🔍 Filters — {mode.label}").classes(
+            f"text-xl font-bold mb-2 text-{mode.accent}-700"
+        )
         ui.label("Select values to filter (multiple selection allowed)").classes(
             "text-sm text-gray-600 mb-2"
         )
@@ -576,6 +635,7 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
                 ("is_moe", "MoE"),
                 ("is_gated", "Gated"),
                 ("Year", "Year"),
+                *mode.extra_filters,
             ]
 
             default_filters: Dict[str, List[str]] = {
@@ -643,20 +703,60 @@ def adapter_source_page(module_name: str):
 
 
 @ui.page("/")
-def main_page():
-    """Main page of the application."""
+def main_page(mode: str = "generative"):
+    """Main page of the application.
+
+    The `mode` query parameter selects which catalog to display:
+    `/?mode=generative` (default) or `/?mode=embedding`.
+    """
+    view_mode = MODES.get(mode, GENERATIVE_MODE)
+
     # Per-session state: each browser connection gets its own viewer so
     # filters / params range / filtered_data are not shared across users.
-    viewer = ModelDataViewer(CSV_PATH)
+    viewer = ModelDataViewer(view_mode.csv_path)
 
-    # Header
+    # Header — gradient + accent change with the mode for clear visual distinction.
     with ui.header().classes(
-        "items-center justify-between bg-gradient-to-r from-blue-600 to-purple-600"
+        f"items-center justify-between {view_mode.header_gradient}"
     ):
-        ui.label("🤗 HuggingFace Model Viewer").classes("text-2xl font-bold text-white")
-        ui.label("Top Generative Models Analysis").classes(
-            "text-sm text-white opacity-80"
-        )
+        with ui.row().classes("items-center gap-3"):
+            ui.label(f"{view_mode.icon} HuggingFace Model Viewer").classes(
+                "text-2xl font-bold text-white"
+            )
+            ui.label(view_mode.label).classes("text-sm text-white opacity-80")
+
+    # Prominent mode selector — large segmented control below the header.
+    # The active segment is filled with the mode's accent color; the inactive one
+    # is a clearly-clickable outlined button. Sits in its own bar so users can't
+    # miss it.
+    with ui.row().classes(
+        "w-full items-center justify-center gap-3 py-3 bg-gray-100 border-b shadow-sm"
+    ):
+        ui.label("").classes("text-base font-semibold text-gray-700")
+        for m in (GENERATIVE_MODE, EMBEDDING_MODE):
+            is_active = m.key == view_mode.key
+            if is_active:
+                ui.button(
+                    f"{m.icon}  {m.label}",
+                    on_click=lambda _, k=m.key: ui.navigate.to(f"/?mode={k}"),
+                ).classes(
+                    f"bg-{m.accent}-600 text-white font-bold "
+                    f"text-base px-6 py-2 rounded-full shadow-lg "
+                    f"ring-2 ring-{m.accent}-300 ring-offset-2"
+                ).props(
+                    "no-caps unelevated"
+                )
+            else:
+                ui.button(
+                    f"{m.icon}  {m.label}",
+                    on_click=lambda _, k=m.key: ui.navigate.to(f"/?mode={k}"),
+                ).classes(
+                    f"bg-white text-{m.accent}-700 font-semibold "
+                    f"text-base px-6 py-2 rounded-full "
+                    f"border-2 border-{m.accent}-400 hover:bg-{m.accent}-50"
+                ).props(
+                    "no-caps flat"
+                )
 
     # Check if data is loaded
     if not viewer.load_data():
@@ -665,7 +765,7 @@ def main_page():
                 "text-2xl font-bold text-red-600"
             )
             ui.label(f"Expected file: {viewer.csv_path}").classes("text-gray-600")
-            ui.label("Please run fetch_top_generative_models.py first.").classes(
+            ui.label(f"Please populate {view_mode.csv_path.name} first.").classes(
                 "text-gray-600 mt-2"
             )
         return
@@ -676,13 +776,16 @@ def main_page():
         content_ref: List[Any] = [None]
 
         # Filter panel — renders first (at top of page).
-        create_filter_panel_lazy(viewer, lambda: content_ref[0])
+        create_filter_panel_lazy(viewer, lambda: content_ref[0], view_mode)
 
         # Content container (rendered below the filter panel).
-        content_ref[0] = ui.column().classes("w-full")
+        # The accent border reinforces which mode is active.
+        content_ref[0] = ui.column().classes(
+            f"w-full border-l-4 border-{view_mode.accent}-400 pl-2"
+        )
 
         # Initial display
-        asyncio.create_task(refresh_display_async(viewer, content_ref[0]))
+        asyncio.create_task(refresh_display_async(viewer, content_ref[0], view_mode))
 
 
 def main():
