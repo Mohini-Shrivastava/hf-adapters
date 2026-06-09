@@ -95,6 +95,26 @@ MODELS = CAUSAL_LM_MODELS
 CASES = {k: ALL_CASES[k] for k in SPYRE_CASE_KEYS}
 EOS_CASES = {k: ALL_EOS_CASES[k] for k in SPYRE_EOS_CASE_KEYS}
 
+# Names of the bespoke (non-greedy, non-forced-EOS) cases. Kept here so the
+# CLI can validate --case against them and so each block can be gated.
+SPECIAL_CASES = [
+    "zero_new_tokens",
+    "sampling_determinism",
+    "no_eos_runs_full_budget",
+    "no_pad_token_fallback",
+    "sampling_top_k_zero",
+    "eos_inside_prompt",
+]
+
+
+def all_case_names():
+    """Every case name accepted by the --case filter."""
+    return (
+        list(CASES.keys())
+        + [f"forced_eos:{k}" for k in EOS_CASES.keys()]
+        + SPECIAL_CASES
+    )
+
 
 # ---------------------------------------------------------------------------
 # One-model driver
@@ -107,7 +127,14 @@ def run_model(model_key, case_filter=None):
     Args:
         model_key: Key from MODELS registry
         case_filter: Optional list of case names to run. If None, runs all cases.
+            Accepts greedy keys (e.g. ``short_one_token``), forced-EOS keys in
+            ``forced_eos:<key>`` form, and any name in ``SPECIAL_CASES``.
     """
+    filter_set = set(case_filter) if case_filter else None
+
+    def should_run(name):
+        return filter_set is None or name in filter_set
+
     info = MODELS[model_key]
     print(f"\n{'='*70}")
     print(f"  {info['name']}: {info['path']}")
@@ -128,6 +155,8 @@ def run_model(model_key, case_filter=None):
 
     case_refs = {}
     for case_id, (targets, max_new) in CASES.items():
+        if not should_run(case_id):
+            continue
         prompts = make_prompts(tokenizer, targets)
         case_refs[case_id] = (
             prompts,
@@ -138,6 +167,8 @@ def run_model(model_key, case_filter=None):
     # pick a forced eos_token_id and compute the expected truncated output.
     eos_refs = {}
     for case_id, (eos_offsets, max_new) in EOS_CASES.items():
+        if not should_run(f"forced_eos:{case_id}"):
+            continue
         batch_size = len(eos_offsets)
         prompts = make_prompts(tokenizer, [5] * batch_size)
         per_prompt_ids = [
@@ -154,30 +185,33 @@ def run_model(model_key, case_filter=None):
     no_eos_prompts = make_prompts(tokenizer, [5, 12])
     no_eos_max_new = 64 + 7  # cross a block boundary (BLOCK_SIZE=64)
     no_eos_refs = []
-    for prompt in no_eos_prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
-        with torch.no_grad():
-            out = ref_model.generate(
-                **encoded,
-                max_new_tokens=no_eos_max_new,
-                do_sample=False,
-                eos_token_id=None,
-                pad_token_id=(
-                    tokenizer.pad_token_id
-                    if tokenizer.pad_token_id is not None
-                    else tokenizer.eos_token_id
-                ),
-            )
-        new_ids = out[0][encoded["input_ids"].shape[1] :]
-        no_eos_refs.append(tokenizer.decode(new_ids, skip_special_tokens=True))
+    if should_run("no_eos_runs_full_budget"):
+        for prompt in no_eos_prompts:
+            encoded = tokenizer(prompt, return_tensors="pt")
+            with torch.no_grad():
+                out = ref_model.generate(
+                    **encoded,
+                    max_new_tokens=no_eos_max_new,
+                    do_sample=False,
+                    eos_token_id=None,
+                    pad_token_id=(
+                        tokenizer.pad_token_id
+                        if tokenizer.pad_token_id is not None
+                        else tokenizer.eos_token_id
+                    ),
+                )
+            new_ids = out[0][encoded["input_ids"].shape[1] :]
+            no_eos_refs.append(tokenizer.decode(new_ids, skip_special_tokens=True))
 
     # No-pad-token reference: same prompts as a normal mixed batch; the
     # adapter side wraps with NoPadTokenizer so generate() takes the
     # ``pad_token = eos_token`` fallback at the top of the function.
     no_pad_prompts = make_prompts(tokenizer, [5, 12])
     no_pad_max_new = 16
-    no_pad_refs = hf_reference_outputs(
-        ref_model, tokenizer, no_pad_prompts, no_pad_max_new
+    no_pad_refs = (
+        hf_reference_outputs(ref_model, tokenizer, no_pad_prompts, no_pad_max_new)
+        if should_run("no_pad_token_fallback")
+        else []
     )
 
     # EOS-inside-prompt reference: a single prompt with the model's eos_token_id
@@ -185,7 +219,7 @@ def run_model(model_key, case_filter=None):
     eos_in_prompt_refs = None
     eos_in_prompt = None
     eos_in_prompt_max_new = 64 + 8
-    if tokenizer.eos_token_id is not None:
+    if should_run("eos_inside_prompt") and tokenizer.eos_token_id is not None:
         eos_in_prompt = make_prompt_with_eos_inside(
             tokenizer, tokenizer.eos_token_id, target_tokens=12
         )
@@ -205,14 +239,9 @@ def run_model(model_key, case_filter=None):
     rows = []
 
     # --- Greedy correctness cases ---
-    # Filter cases if requested
-    cases_to_run = CASES
-    if case_filter:
-        cases_to_run = {k: v for k, v in CASES.items() if k in case_filter}
-        if not cases_to_run:
-            print(f"  No matching greedy cases found for filter: {case_filter}")
-
-    print(f"  Running {len(cases_to_run)} greedy correctness cases ...")
+    cases_to_run = {k: CASES[k] for k in case_refs}
+    if cases_to_run:
+        print(f"  Running {len(cases_to_run)} greedy correctness cases ...")
     for case_id, (targets, max_new) in cases_to_run.items():
         prompts, hf_outputs = case_refs[case_id]
         try:
@@ -239,44 +268,41 @@ def run_model(model_key, case_filter=None):
             }
         )
 
-    # If case filter was specified, only run those cases and return early
-    if case_filter:
-        del model
-        gc.collect()
-        return rows
-
     # --- max_new_tokens=0 (locks in empty-output contract) ---
-    print("  Running max_new_tokens=0 case ...")
-    try:
-        t0 = time.time()
-        prompts = make_prompts(tokenizer, [5, 12])
-        out = model.generate(tokenizer, prompts, max_new_tokens=0, do_sample=False)
-        elapsed = time.time() - t0
-        ok = len(out) == len(prompts) and all(s == "" for s in out)
-        print(f"    zero_new_tokens: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        rows.append(
-            {
-                "case": "zero_new_tokens",
-                "status": "PASS" if ok else "FAIL",
-                "elapsed_s": elapsed,
-                "detail": "" if ok else f"got={out!r}",
-            }
-        )
-    except Exception:
-        traceback.print_exc()
-        print("    zero_new_tokens: ERROR")
-        rows.append(
-            {
-                "case": "zero_new_tokens",
-                "status": "ERROR",
-                "elapsed_s": 0.0,
-                "detail": "",
-            }
-        )
+    if should_run("zero_new_tokens"):
+        print("  Running max_new_tokens=0 case ...")
+        try:
+            t0 = time.time()
+            prompts = make_prompts(tokenizer, [5, 12])
+            out = model.generate(tokenizer, prompts, max_new_tokens=0, do_sample=False)
+            elapsed = time.time() - t0
+            ok = len(out) == len(prompts) and all(s == "" for s in out)
+            print(f"    zero_new_tokens: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
+            rows.append(
+                {
+                    "case": "zero_new_tokens",
+                    "status": "PASS" if ok else "FAIL",
+                    "elapsed_s": elapsed,
+                    "detail": "" if ok else f"got={out!r}",
+                }
+            )
+        except Exception:
+            traceback.print_exc()
+            print("    zero_new_tokens: ERROR")
+            rows.append(
+                {
+                    "case": "zero_new_tokens",
+                    "status": "ERROR",
+                    "elapsed_s": 0.0,
+                    "detail": "",
+                }
+            )
 
     # --- Forced EOS cases ---
-    print(f"  Running {len(EOS_CASES)} forced EOS cases ...")
-    for case_id, (eos_offsets, max_new) in EOS_CASES.items():
+    eos_cases_to_run = {k: EOS_CASES[k] for k in eos_refs}
+    if eos_cases_to_run:
+        print(f"  Running {len(eos_cases_to_run)} forced EOS cases ...")
+    for case_id, (eos_offsets, max_new) in eos_cases_to_run.items():
         prompts, per_prompt_ids = eos_refs[case_id]
         eos_id = pick_forced_eos_id(per_prompt_ids, eos_offsets)
         if eos_id is None:
@@ -325,193 +351,208 @@ def run_model(model_key, case_filter=None):
         )
 
     # --- Sampling determinism (same seed -> equal; different seed -> differ) ---
-    print("  Running sampling determinism case ...")
-    try:
-        sampling_kwargs = SAMPLING_KWARGS
-        max_new = SAMPLING_MAX_NEW
-
-        t0 = time.time()
-        torch.manual_seed(1234)
-        a1 = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=max_new, **sampling_kwargs
-        )
-        torch.manual_seed(1234)
-        a2 = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=max_new, **sampling_kwargs
-        )
-        torch.manual_seed(9999)
-        b = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=max_new, **sampling_kwargs
-        )
-        elapsed = time.time() - t0
-        ok = a1 == a2 and a1 != b
-        print(f"    sampling_determinism: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        rows.append(
-            {
-                "case": "sampling_determinism",
-                "status": "PASS" if ok else "FAIL",
-                "elapsed_s": elapsed,
-                "detail": "" if ok else f"a1={a1!r} a2={a2!r} b={b!r}",
-            }
-        )
-    except Exception:
-        traceback.print_exc()
-        print("    sampling_determinism: ERROR")
-        rows.append(
-            {
-                "case": "sampling_determinism",
-                "status": "ERROR",
-                "elapsed_s": 0.0,
-                "detail": "",
-            }
-        )
-
-    # --- eos_token_id is None: full-budget generation, no early stop ---
-    print("  Running no-EOS full-budget case ...")
-    try:
-        t0 = time.time()
-        out = model.generate(
-            tokenizer,
-            no_eos_prompts,
-            max_new_tokens=no_eos_max_new,
-            do_sample=False,
-            eos_token_id=None,
-        )
-        elapsed = time.time() - t0
-        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_eos_refs, out))
-        print(
-            f"    no_eos_runs_full_budget: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)"
-        )
-        rows.append(
-            {
-                "case": "no_eos_runs_full_budget",
-                "status": "PASS" if ok else "FAIL",
-                "elapsed_s": elapsed,
-                "detail": "" if ok else f"hf={no_eos_refs!r} spyre={out!r}",
-            }
-        )
-    except Exception:
-        traceback.print_exc()
-        print("    no_eos_runs_full_budget: ERROR")
-        rows.append(
-            {
-                "case": "no_eos_runs_full_budget",
-                "status": "ERROR",
-                "elapsed_s": 0.0,
-                "detail": "",
-            }
-        )
-
-    # --- pad_token is None: ``pad_token = eos_token`` fallback ---
-    print("  Running no-pad-token fallback case ...")
-    try:
-        wrapped = NoPadTokenizer(tokenizer)
-        t0 = time.time()
-        out = model.generate(
-            wrapped, no_pad_prompts, max_new_tokens=no_pad_max_new, do_sample=False
-        )
-        elapsed = time.time() - t0
-        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, out))
-        print(f"    no_pad_token_fallback: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        rows.append(
-            {
-                "case": "no_pad_token_fallback",
-                "status": "PASS" if ok else "FAIL",
-                "elapsed_s": elapsed,
-                "detail": "" if ok else f"hf={no_pad_refs!r} spyre={out!r}",
-            }
-        )
-    except Exception:
-        traceback.print_exc()
-        print("    no_pad_token_fallback: ERROR")
-        rows.append(
-            {
-                "case": "no_pad_token_fallback",
-                "status": "ERROR",
-                "elapsed_s": 0.0,
-                "detail": "",
-            }
-        )
-
-    # --- top_k=0 sampling: skip the top-k filter branch ---
-    print("  Running top_k=0 sampling case ...")
-    try:
-        kwargs = dict(do_sample=True, temperature=1.0, top_k=0)
-        t0 = time.time()
-        torch.manual_seed(2024)
-        out1 = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
-        )
-        torch.manual_seed(2024)
-        out2 = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
-        )
-        elapsed = time.time() - t0
-        ok = out1 == out2 and all(s for s in out1)
-        print(f"    sampling_top_k_zero: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        rows.append(
-            {
-                "case": "sampling_top_k_zero",
-                "status": "PASS" if ok else "FAIL",
-                "elapsed_s": elapsed,
-                "detail": "" if ok else f"out1={out1!r} out2={out2!r}",
-            }
-        )
-    except Exception:
-        traceback.print_exc()
-        print("    sampling_top_k_zero: ERROR")
-        rows.append(
-            {
-                "case": "sampling_top_k_zero",
-                "status": "ERROR",
-                "elapsed_s": 0.0,
-                "detail": "",
-            }
-        )
-
-    # --- EOS id inside the prompt: must NOT be mistaken for an emission ---
-    print("  Running EOS-inside-prompt case ...")
-    if eos_in_prompt is None:
-        print("    eos_inside_prompt: SKIP")
-        rows.append(
-            {
-                "case": "eos_inside_prompt",
-                "status": "SKIP",
-                "elapsed_s": 0.0,
-                "detail": "tokenizer has no eos_token_id",
-            }
-        )
-    else:
+    if should_run("sampling_determinism"):
+        print("  Running sampling determinism case ...")
         try:
+            sampling_kwargs = SAMPLING_KWARGS
+            max_new = SAMPLING_MAX_NEW
+
             t0 = time.time()
-            out = model.generate(
-                tokenizer,
-                [eos_in_prompt],
-                max_new_tokens=eos_in_prompt_max_new,
-                do_sample=False,
+            torch.manual_seed(1234)
+            a1 = model.generate(
+                tokenizer, sampling_prompts, max_new_tokens=max_new, **sampling_kwargs
+            )
+            torch.manual_seed(1234)
+            a2 = model.generate(
+                tokenizer, sampling_prompts, max_new_tokens=max_new, **sampling_kwargs
+            )
+            torch.manual_seed(9999)
+            b = model.generate(
+                tokenizer, sampling_prompts, max_new_tokens=max_new, **sampling_kwargs
             )
             elapsed = time.time() - t0
-            ok = eos_in_prompt_refs[0].strip() == out[0].strip()
-            print(f"    eos_inside_prompt: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
+            ok = a1 == a2 and a1 != b
+            print(
+                f"    sampling_determinism: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)"
+            )
             rows.append(
                 {
-                    "case": "eos_inside_prompt",
+                    "case": "sampling_determinism",
                     "status": "PASS" if ok else "FAIL",
                     "elapsed_s": elapsed,
-                    "detail": "" if ok else f"hf={eos_in_prompt_refs!r} spyre={out!r}",
+                    "detail": "" if ok else f"a1={a1!r} a2={a2!r} b={b!r}",
                 }
             )
         except Exception:
             traceback.print_exc()
-            print("    eos_inside_prompt: ERROR")
+            print("    sampling_determinism: ERROR")
             rows.append(
                 {
-                    "case": "eos_inside_prompt",
+                    "case": "sampling_determinism",
                     "status": "ERROR",
                     "elapsed_s": 0.0,
                     "detail": "",
                 }
             )
+
+    # --- eos_token_id is None: full-budget generation, no early stop ---
+    if should_run("no_eos_runs_full_budget"):
+        print("  Running no-EOS full-budget case ...")
+        try:
+            t0 = time.time()
+            out = model.generate(
+                tokenizer,
+                no_eos_prompts,
+                max_new_tokens=no_eos_max_new,
+                do_sample=False,
+                eos_token_id=None,
+            )
+            elapsed = time.time() - t0
+            ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_eos_refs, out))
+            print(
+                f"    no_eos_runs_full_budget: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)"
+            )
+            rows.append(
+                {
+                    "case": "no_eos_runs_full_budget",
+                    "status": "PASS" if ok else "FAIL",
+                    "elapsed_s": elapsed,
+                    "detail": "" if ok else f"hf={no_eos_refs!r} spyre={out!r}",
+                }
+            )
+        except Exception:
+            traceback.print_exc()
+            print("    no_eos_runs_full_budget: ERROR")
+            rows.append(
+                {
+                    "case": "no_eos_runs_full_budget",
+                    "status": "ERROR",
+                    "elapsed_s": 0.0,
+                    "detail": "",
+                }
+            )
+
+    # --- pad_token is None: ``pad_token = eos_token`` fallback ---
+    if should_run("no_pad_token_fallback"):
+        print("  Running no-pad-token fallback case ...")
+        try:
+            wrapped = NoPadTokenizer(tokenizer)
+            t0 = time.time()
+            out = model.generate(
+                wrapped, no_pad_prompts, max_new_tokens=no_pad_max_new, do_sample=False
+            )
+            elapsed = time.time() - t0
+            ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, out))
+            print(
+                f"    no_pad_token_fallback: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)"
+            )
+            rows.append(
+                {
+                    "case": "no_pad_token_fallback",
+                    "status": "PASS" if ok else "FAIL",
+                    "elapsed_s": elapsed,
+                    "detail": "" if ok else f"hf={no_pad_refs!r} spyre={out!r}",
+                }
+            )
+        except Exception:
+            traceback.print_exc()
+            print("    no_pad_token_fallback: ERROR")
+            rows.append(
+                {
+                    "case": "no_pad_token_fallback",
+                    "status": "ERROR",
+                    "elapsed_s": 0.0,
+                    "detail": "",
+                }
+            )
+
+    # --- top_k=0 sampling: skip the top-k filter branch ---
+    if should_run("sampling_top_k_zero"):
+        print("  Running top_k=0 sampling case ...")
+        try:
+            kwargs = dict(do_sample=True, temperature=1.0, top_k=0)
+            t0 = time.time()
+            torch.manual_seed(2024)
+            out1 = model.generate(
+                tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
+            )
+            torch.manual_seed(2024)
+            out2 = model.generate(
+                tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
+            )
+            elapsed = time.time() - t0
+            ok = out1 == out2 and all(s for s in out1)
+            print(
+                f"    sampling_top_k_zero: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)"
+            )
+            rows.append(
+                {
+                    "case": "sampling_top_k_zero",
+                    "status": "PASS" if ok else "FAIL",
+                    "elapsed_s": elapsed,
+                    "detail": "" if ok else f"out1={out1!r} out2={out2!r}",
+                }
+            )
+        except Exception:
+            traceback.print_exc()
+            print("    sampling_top_k_zero: ERROR")
+            rows.append(
+                {
+                    "case": "sampling_top_k_zero",
+                    "status": "ERROR",
+                    "elapsed_s": 0.0,
+                    "detail": "",
+                }
+            )
+
+    # --- EOS id inside the prompt: must NOT be mistaken for an emission ---
+    if should_run("eos_inside_prompt"):
+        print("  Running EOS-inside-prompt case ...")
+        if eos_in_prompt is None:
+            print("    eos_inside_prompt: SKIP")
+            rows.append(
+                {
+                    "case": "eos_inside_prompt",
+                    "status": "SKIP",
+                    "elapsed_s": 0.0,
+                    "detail": "tokenizer has no eos_token_id",
+                }
+            )
+        else:
+            try:
+                t0 = time.time()
+                out = model.generate(
+                    tokenizer,
+                    [eos_in_prompt],
+                    max_new_tokens=eos_in_prompt_max_new,
+                    do_sample=False,
+                )
+                elapsed = time.time() - t0
+                ok = eos_in_prompt_refs[0].strip() == out[0].strip()
+                print(
+                    f"    eos_inside_prompt: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)"
+                )
+                rows.append(
+                    {
+                        "case": "eos_inside_prompt",
+                        "status": "PASS" if ok else "FAIL",
+                        "elapsed_s": elapsed,
+                        "detail": (
+                            "" if ok else f"hf={eos_in_prompt_refs!r} spyre={out!r}"
+                        ),
+                    }
+                )
+            except Exception:
+                traceback.print_exc()
+                print("    eos_inside_prompt: ERROR")
+                rows.append(
+                    {
+                        "case": "eos_inside_prompt",
+                        "status": "ERROR",
+                        "elapsed_s": 0.0,
+                        "detail": "",
+                    }
+                )
 
     del model
     gc.collect()
@@ -537,23 +578,33 @@ def print_summary(model_to_rows):
 
 
 if __name__ == "__main__":
+    epilog_lines = [
+        "Examples:",
+        "  # Run all tests for qwen3 (default)",
+        "  python3 tests/test_generate_edge_cases_spyre.py",
+        "",
+        "  # Run all tests for specific models",
+        "  python3 tests/test_generate_edge_cases_spyre.py qwen3 granite2b",
+        "",
+        "  # Run only short_two_blocks_plus test for qwen3",
+        "  python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus",
+        "",
+        "  # Run multiple specific cases (mix of greedy / forced_eos / special)",
+        "  python3 tests/test_generate_edge_cases_spyre.py qwen3 \\",
+        "      --case short_two_blocks_plus sampling_determinism forced_eos:eos_mid_block",
+        "",
+        "Available cases:",
+        "  Greedy:",
+        *[f"    {k}" for k in CASES.keys()],
+        "  Forced-EOS:",
+        *[f"    forced_eos:{k}" for k in EOS_CASES.keys()],
+        "  Special:",
+        *[f"    {k}" for k in SPECIAL_CASES],
+    ]
     parser = argparse.ArgumentParser(
         description="Run Spyre generate() edge-case tests",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run all tests for qwen3 (default)
-  python3 tests/test_generate_edge_cases_spyre.py
-
-  # Run all tests for specific models
-  python3 tests/test_generate_edge_cases_spyre.py qwen3 granite2b
-
-  # Run only short_two_blocks_plus test for qwen3
-  python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus
-
-  # Run multiple specific cases
-  python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus single_token_prompt
-        """,
+        epilog="\n".join(epilog_lines),
     )
     parser.add_argument(
         "models",
@@ -565,7 +616,7 @@ Examples:
         "--case",
         nargs="+",
         dest="cases",
-        help=f"Run only specific test cases. Options: {list(CASES.keys())}",
+        help="Run only specific test cases. See 'Available cases' below for the full list.",
     )
 
     args = parser.parse_args()
@@ -574,11 +625,11 @@ Examples:
 
     if case_filter:
         print(f"Running filtered cases: {case_filter}")
-        # Validate case names
-        invalid_cases = [c for c in case_filter if c not in CASES]
+        valid = set(all_case_names())
+        invalid_cases = [c for c in case_filter if c not in valid]
         if invalid_cases:
             print(f"ERROR: Unknown case(s): {invalid_cases}")
-            print(f"Available cases: {list(CASES.keys())}")
+            print(f"Available cases: {sorted(valid)}")
             sys.exit(1)
 
     model_to_rows = {}
