@@ -30,7 +30,7 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen3-0.6B",
         "adapter": "hf_qwen3.py",
     },
-    "granite": {
+    "granite8b": {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
@@ -44,7 +44,6 @@ CAUSAL_LM_MODELS = {
         "name": "Granite 4.0 1B",
         "path": "ibm-granite/granite-4.0-1b-base",
         "adapter": "hf_granitemoehybrid.py",
-        "dtype": "float32",  # fp16 overflows on CPU due to multipliers
     },
     "smollm3": {
         "name": "SmolLM3 3B",
@@ -76,12 +75,12 @@ CAUSAL_LM_MODELS = {
         "path": "ministral/Ministral-3b-instruct",
         "adapter": "hf_mistral.py",
     },
-    "olmo": {
+    "olmo1b": {
         "name": "OLMo 1B",
         "path": "allenai/OLMo-1B-hf",
         "adapter": "hf_olmo.py",
     },
-    "olmo2": {
+    "olmo2_1b": {
         "name": "OLMo2 1B",
         "path": "allenai/OLMo-2-0425-1B",
         "adapter": "hf_olmo2.py",
@@ -203,7 +202,7 @@ def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
     return adapter_module.__name__.split(".")[-1]
 
 
-def _select_representative_models(config_mapping=None):
+def select_representative_models(config_mapping=None):
     """
     Programmatically select one representative model per adapter module.
 
