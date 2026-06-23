@@ -63,6 +63,7 @@ from transformers import (
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
+from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 from hf_adapters import (
     hf_bert,
@@ -73,6 +74,7 @@ from hf_adapters import (
     hf_granitemoehybrid,
     hf_llama,
     hf_mistral,
+    hf_mistral3,
     hf_modernbert,
     hf_mpnet,
     hf_olmo,
@@ -102,6 +104,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     GraniteMoeHybridConfig: hf_granitemoehybrid,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
+    Mistral3Config: hf_mistral3,
     ModernBertConfig: hf_modernbert,
     MPNetConfig: hf_mpnet,
     OlmoConfig: hf_olmo,
