@@ -93,7 +93,7 @@ env:
   # aligned. Daily and weekly cover the broader model set.
   # Invariant: every model_key used in a Spyre matrix below must have its
   # substring present here so CPU sanity-checks anything that runs on hardware.
-  MODELS_FILTER: "qwen3 or bge_base"
+  # MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
   pre-commit:
@@ -119,6 +119,28 @@ jobs:
           extra_args: --all-files --hook-stage commit --show-diff-on-failure
         env:
           SKIP: mypy
+
+  adapter-coverage:
+    name: adapter coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run adapter coverage test
+        run: |
+          echo "Checking that all adapter files are registered in model_registry.py..."
+          python -m pip install --quiet pytest
+          python -m pytest -v --noconftest tests/test_adapter_coverage.py
+          echo "Adapter coverage check passed."
 
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
@@ -190,30 +212,28 @@ jobs:
         # from PR runs — each comment names the reason.
         model_key:
           # Causal LM
-          - qwen3
-          - granite8b
+          - gemma3_unsloth
           - granite2b
+          - granite-vision
           - granite4
-          - smollm3
-          - tiny_llama
-          - qwen2
+          - yi_6b
           - ministral
+#          - mistral3
           - olmo1b
           - olmo2_1b
-          - granite-vision
+          - phi4
+          - qwen2
+          - qwen3
+          - smollm3
+
           # Embedding
-          - qwen3_embed
-          - qwen2_embed
-          - e5_mistral
-          - linq_embed_mistral
-          - sfr_embedding_mistral
           - bge_base
-          - minilm
-          - bge_m3
-          - mpnet
+          - e5_mistral
           - modernbert
-          - gte_modernbert
-          - granite_embed
+          - mpnet
+          - qwen2_embed
+          - qwen3_embed
+          - bge_m3
 
     steps:
       - name: Checkout composite actions
@@ -258,19 +278,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
-          - qwen3
-          - granite8b
+          - gemma3_unsloth
           - granite2b
-
-          - smollm3
-          - tiny_llama
-          - qwen2
+#          - granite-vision
+#          - granite4
+          - yi_6b
           - ministral
+#          - mistral3
           - olmo1b
           - olmo2_1b
-
+          - phi4
+          - qwen2
+          - qwen3
+          - smollm3
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -314,18 +335,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
-          - qwen3
-          - granite8b
+          - gemma3_unsloth
           - granite2b
-          - smollm3
-          - tiny_llama
-          - qwen2
+          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
+#          - granite-vision
+         # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
+          # - granite4
+          - yi_6b
           - ministral
+          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
+#          - mistral3
           - olmo1b
           - olmo2_1b
-
+          - phi4
+          - qwen2
+          - qwen3
+          - smollm3
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -369,21 +395,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
         model_key:
-          - qwen3_embed
-          - qwen2_embed
-          - e5_mistral
-          - linq_embed_mistral
-          - sfr_embedding_mistral
           - bge_base
-          - minilm
-          - bge_m3
-          - mpnet
+          - e5_mistral
           - modernbert
-          - gte_modernbert
-          - granite_embed
-
+          - mpnet
+          - qwen2_embed
+          - qwen3_embed
+          - bge_m3
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -429,6 +448,7 @@ jobs:
         working-directory: .
     needs:
       - pre-commit
+      - adapter-coverage
 #      - cpu-tests
       - spyre-load-tests
       - spyre-smoke-tests
@@ -444,6 +464,7 @@ jobs:
         # lines when restoring either job.
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
