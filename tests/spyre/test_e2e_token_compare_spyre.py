@@ -30,7 +30,7 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
+from _helpers import load_hf_causal_lm, torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 from hf_adapters.hf_common import (
@@ -273,7 +273,7 @@ def _print_table(rows):
 
 def _run_model_test(model_key, num_decode=4):
     """Full comparison for one model. Returns the list of comparison rows."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     info = CAUSAL_LM_MODELS[model_key]
     adapter_module_name = info["adapter"].replace(".py", "")
@@ -284,12 +284,10 @@ def _run_model_test(model_key, num_decode=4):
     print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    dtype = torch_dtype_for(info)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"],
-        torch_dtype=dtype,
-        device_map="cpu",
-    )
+    # CPU reference uses the dtype from registry (may be float32 for stability)
+    cpu_dtype = torch_dtype_for(info)
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    model = load_hf_causal_lm(info, cpu_dtype, adapter_mod=adapter)
     model.eval()
     model.requires_grad_(False)
 
@@ -305,7 +303,9 @@ def _run_model_test(model_key, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    # Spyre always uses float16 (doesn't support float32)
+    spyre_dtype = torch.float16
+    _move_to_spyre_with_layout(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

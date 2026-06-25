@@ -51,8 +51,9 @@ from _generate_edge_case_helpers import (
     make_prompts,
     pick_forced_eos_id,
 )
+from _helpers import load_hf_causal_lm
 from model_registry import CAUSAL_LM_MODELS as MODELS
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 # All tests in this file are marked `slow` and dropped from PR runs except
 # `test_generate_zero_new_tokens`, which is the lightest case and acts as the
@@ -83,9 +84,8 @@ def _run_adapter_generate(
     ``do_sample``, ``temperature``, ``top_k``).
     """
     torch_dtype = _torch_dtype(info)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
@@ -107,9 +107,8 @@ def _run_adapter_generate(
 def _load_prepared_model(info, adapter_mod, unwrap_fn):
     """Load + prepare an adapter model once. Caller is responsible for ``del`` + gc."""
     torch_dtype = _torch_dtype(info)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
@@ -145,9 +144,14 @@ def _hf_reference_cached(info, tokenizer, prompts, max_new_tokens):
     if key in _HF_REF_CACHE:
         return _HF_REF_CACHE[key]
     torch_dtype = _torch_dtype(info)
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    # Note: adapter_mod not available here, but this is for reference model only
+    # For models with load_fn, we need to import the adapter
+    import importlib
+
+    adapter_module_name = info["adapter"].replace(".py", "")
+    adapter_mod = importlib.import_module(f"hf_adapters.{adapter_module_name}")
+    ref_model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new_tokens)
@@ -265,9 +269,8 @@ def test_generate_forced_eos(
 
     # Step 1: capture each prompt's natural greedy continuation.
     torch_dtype = _torch_dtype(info)
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    ref_model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     per_prompt_ids = [
@@ -426,9 +429,8 @@ def test_generate_no_eos_runs_full_budget(
 
     # HF reference with eos_token_id=None so HF also runs the full budget.
     torch_dtype = _torch_dtype(info)
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    ref_model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     hf_outputs = []

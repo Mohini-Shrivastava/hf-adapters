@@ -28,7 +28,8 @@ import gc
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from _helpers import load_hf_causal_lm
+from transformers import AutoTokenizer
 
 PROMPTS = [
     "The capital of France is",
@@ -103,9 +104,8 @@ def test_multibatch(model_key, load_adapter, unwrap_compiled_blocks, hf_common_m
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
 
     # HF reference (per-prompt, BEFORE patching for cleanliness)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     hf_outputs = _hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
@@ -113,9 +113,8 @@ def test_multibatch(model_key, load_adapter, unwrap_compiled_blocks, hf_common_m
     gc.collect()
 
     # Adapter batched generate
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    # Use load_hf_causal_lm to handle models with custom loading (e.g., multimodal Mistral3)
+    model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)

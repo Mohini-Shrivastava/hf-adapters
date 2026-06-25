@@ -41,15 +41,20 @@ from _generate_edge_case_helpers import (
     make_prompt_with_eos_inside,
     make_prompts,
 )
+from _helpers import load_hf_causal_lm
 from model_registry import CAUSAL_LM_MODELS
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 
 def _load_ref_model(info):
+    """Load HF reference model, handling models with custom loading (e.g., multimodal Mistral3)."""
+    import importlib
+
     ref_dtype = torch.float32 if info.get("dtype") == "float32" else torch.float16
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=ref_dtype, device_map="cpu"
-    )
+    # Import adapter module to handle models with load_fn=True
+    adapter_module_name = info["adapter"].replace(".py", "")
+    adapter_mod = importlib.import_module(f"hf_adapters.{adapter_module_name}")
+    ref_model = load_hf_causal_lm(info, ref_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     return ref_model
