@@ -57,26 +57,31 @@ Usage (on Spyre pod)::
 import gc
 import importlib
 import math
+import types
+from typing import Any
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
 from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
     stock_vlm_greedy_steps,
 )
+from conftest import load_hf_vlm
 from model_registry import VISION_MODELS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     _model_dtype,
-    _move_to_spyre_with_layout,
     allocate_kv_caches,
     build_expansion_mask,
+    move_to_spyre_with_layout,
+    pad_and_position,
 )
+from tests.conftest import torch_dtype_for
 
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept
@@ -92,7 +97,13 @@ PROMPT = "Briefly describe this image."
 MODELS = {k: v for k, v in VISION_MODELS.items() if v.get("kind") == "vlm"}
 
 
-def _adapter_generate(adapter, model, processor, batch, max_new_tokens):
+def _adapter_generate(
+    adapter: types.ModuleType,
+    model: nn.Module,
+    processor: Any,
+    batch: dict[str, torch.Tensor],
+    max_new_tokens: int,
+) -> list[str]:
     """Drive an adapter's multimodal ``generate`` from a processor batch."""
     return adapter.generate(
         model,
@@ -106,7 +117,12 @@ def _adapter_generate(adapter, model, processor, batch, max_new_tokens):
     )
 
 
-def _adapter_teacher_forced_steps(adapter, model, batch, forced_tokens):
+def _adapter_teacher_forced_steps(
+    adapter: types.ModuleType,
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    forced_tokens: list[int],
+) -> list[torch.Tensor]:
     """Per-step adapter logits on Spyre, teacher-forced on ``forced_tokens``.
 
     Replicates the adapter ``generate`` block-decode bookkeeping (KV caches,
@@ -137,7 +153,7 @@ def _adapter_teacher_forced_steps(adapter, model, batch, forced_tokens):
         math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
         + math.ceil((n_steps + 1) / BLOCK_SIZE) * BLOCK_SIZE
     )
-    padded_ids, padded_len, prompt_offsets, position_ids = adapter._pad_and_position(
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
@@ -231,7 +247,7 @@ def _adapter_teacher_forced_steps(adapter, model, batch, forced_tokens):
 
 
 @pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_vlm_generate_spyre(model_key):
+def test_vlm_generate_spyre(model_key: str) -> None:
     info = MODELS[model_key]
     adapter_module_name = info["adapter"].replace(".py", "")
     adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
@@ -258,10 +274,10 @@ def test_vlm_generate_spyre(model_key):
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = adapter.load_hf_model(info["path"], dtype)
+    model = load_hf_vlm(info, dtype, adapter_mod=adapter)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    move_to_spyre_with_layout(model, dtype)
 
     # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
     # comparison is free of greedy-fork drift while still exercising decode).
