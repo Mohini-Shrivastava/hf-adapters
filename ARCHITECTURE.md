@@ -32,6 +32,7 @@ which models are supported on Spyre.
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 12B Base | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 31B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -142,7 +143,7 @@ pattern, norms, and weight layout.
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 4 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 2 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 3 | Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
