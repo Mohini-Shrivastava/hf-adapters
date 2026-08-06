@@ -45,6 +45,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForQuestionAnswering,
     AutoModelForSequenceClassification,
     BertConfig,
     Gemma3Config,
@@ -354,6 +355,72 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
             )
 
         model.rerank = MethodType(model_rerank, model)  # type: ignore[assignment]
+        return model
+
+
+class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
+    """Load a RoBERTa-family extractive QA model and prepare it for Spyre.
+
+    Loads via ``AutoModelForQuestionAnswering``, compiles the encoder backbone
+    on Spyre, and attaches a ``predict`` method that tokenizes question-context
+    pairs and returns per-token start and end logits.
+
+    Example::
+
+        model = AutoSpyreModelForQuestionAnswering.from_pretrained(
+            "deepset/roberta-base-squad2"
+        )
+        tokenizer = AutoTokenizer.from_pretrained("deepset/roberta-base-squad2")
+        start_logits, end_logits = model.predict(
+            tokenizer, [("Who invented Python?", "Python was created by Guido van Rossum.")]
+        )
+    """
+
+    _auto_model_cls = AutoModelForQuestionAnswering  # type: ignore[assignment]
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+    ) -> torch.nn.Module:
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, mapping=cls._module_mapping
+        )
+        model: torch.nn.Module = super().from_pretrained(
+            model_name_or_path, dtype=dtype
+        )
+
+        def model_predict(
+            self: torch.nn.Module,
+            tokenizer: Any,
+            pairs: list[tuple[str, str]],
+            **kwargs: Any,
+        ):
+            from hf_adapters.hf_common import prefill_qa
+
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            encoded = tokenizer(
+                pairs,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                padding_side="right",
+                return_attention_mask=True,
+            )
+            return prefill_qa(
+                module._run_backbone_forward,
+                self,
+                encoded["input_ids"],
+                encoded["attention_mask"],
+                token_type_ids=encoded.get("token_type_ids", None),
+            )
+
+        model.predict = MethodType(model_predict, model)  # type: ignore[assignment]
         return model
 
 

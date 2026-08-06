@@ -62,6 +62,17 @@ CPU (see Multimodal VLM Path below).
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99964 at every step with 5/5 top-1 agreement, producing a caption byte-identical to stock.
 
+### Extractive Question Answering
+
+Encoder-only span-extraction models. Use `AutoSpyreModelForQuestionAnswering` for the recommended API, or call `prefill_qa` directly.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| deepset/roberta-base-squad2 | roberta | 64 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = adapter `start_logits` / `end_logits` match stock HF within absolute tolerance 0.1 on CPU, and the predicted answer span (argmax start + end) is identical (`test_qa_cpu_accuracy.py`).
+**Spyre Compiles / Spyre Runs** = via `test_e2e_qa_compare_spyre.py`. Span prediction is identical to the CPU reference.
+
 ### Embedding
 
 Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `prefill_encoder` directly from stock HF models.
@@ -112,8 +123,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 27 adapters · 46 verified checkpoints · 100+ compatible models.
-The 46 verified rows are 29 generative + 13 embedding + 4 vision-language (see the
+**Coverage:** 27 adapters · 47 verified checkpoints · 100+ compatible models.
+The 47 verified rows are 29 generative + 13 embedding + 1 question-answering + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -155,7 +166,7 @@ pattern, norms, and weight layout.
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
-| hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
+| hf\_xlm\_roberta.py | xlm-roberta / roberta | 2 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes; deepset/roberta-large-squad2 and other RoBERTa QA fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
 
@@ -179,6 +190,34 @@ outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 ```
 
 `AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
+
+### Extractive QA Auto API
+
+```python
+from hf_adapters import AutoSpyreModelForQuestionAnswering
+from transformers import AutoTokenizer
+
+model = AutoSpyreModelForQuestionAnswering.from_pretrained("deepset/roberta-base-squad2")
+tokenizer = AutoTokenizer.from_pretrained("deepset/roberta-base-squad2")
+
+question = "What is the capital city of France?"
+context  = "France is a country in Western Europe. Its capital city is Paris."
+
+input_ids = tokenizer(question, context, return_tensors="pt")["input_ids"]
+start_logits, end_logits = model.predict(tokenizer, [(question, context)])
+
+start = int(start_logits[0].argmax())
+end   = int(end_logits[0].argmax())
+answer = tokenizer.decode(input_ids[0, start : end + 1], skip_special_tokens=True)
+print(f"Answer: {answer}")  # → Paris
+```
+
+`AutoSpyreModelForQuestionAnswering` loads via `AutoModelForQuestionAnswering`,
+compiles the encoder backbone on Spyre, keeps the `qa_outputs` linear head
+(`Linear(hidden, 2)`) on CPU (output dim 2 is not stick-aligned), and returns
+`(start_logits, end_logits)` each `[B, L]` on CPU. Supported for any model
+whose config maps to `hf_xlm_roberta` — currently `RobertaConfig` and
+`XLMRobertaConfig`.
 
 ### Multimodal (image→text) Auto API
 

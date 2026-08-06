@@ -595,3 +595,15 @@ RERANKER_MODELS = {
 }
 
 RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
+
+QA_MODELS = {
+    # hf_xlm_roberta.py
+    "roberta_base_squad2": {
+        "name": "RoBERTa Base SQuAD2",
+        "path": "deepset/roberta-base-squad2",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
+}
+
+QA_PATHS: list[str] = [m["path"] for m in QA_MODELS.values()]

@@ -2414,6 +2414,58 @@ def prefill_reranker(
 
 
 # ---------------------------------------------------------------------------
+# Extractive QA prefill driver (RoBERTa / BERT QA family)
+# ---------------------------------------------------------------------------
+
+
+def prefill_qa(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+):
+    """One-shot prefill for extractive question-answering models.
+
+    Runs the encoder backbone on Spyre via ``prefill_encoder``, then applies
+    the ``qa_outputs`` linear head (``Linear(hidden, 2)``) on CPU to produce
+    per-token start and end logits.
+
+    The QA head is run outside torch.compile on CPU to avoid:
+    - ``aten.slice`` for span extraction which does not lower on Spyre.
+    - ``out_proj: Linear(hidden, 2)`` whose output dim=2 is not stick-aligned.
+
+    Args:
+        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
+            token_type_ids) -> [B, padded_len, H]``.
+        model: Prepared ``RobertaForQuestionAnswering`` (or similar) on Spyre.
+        input_ids: ``[B, L]`` token ids on CPU.
+        attention_mask: ``[B, L]`` mask on CPU.
+        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None.
+
+    Returns:
+        Tuple of ``(start_logits, end_logits)``, each ``[B, L]`` float32 on CPU.
+    """
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    # Run the QA head on the same device it lives on
+    # (CPU — kept off Spyre via _spyre_cpu_submodules in prepare_for_spyre).
+    qa_outputs = model.qa_outputs
+    head_device = next(qa_outputs.parameters()).device
+    logits = qa_outputs(last_hidden_state.to(head_device))  # [B, L, 2]
+
+    start_logits = logits[:, :, 0].to("cpu")  # [B, L]
+    end_logits = logits[:, :, 1].to("cpu")  # [B, L]
+    return start_logits, end_logits
+
+
+# ---------------------------------------------------------------------------
 # Vision-encoder prefill driver
 # ---------------------------------------------------------------------------
 

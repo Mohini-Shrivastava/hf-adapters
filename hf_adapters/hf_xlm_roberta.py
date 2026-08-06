@@ -97,8 +97,13 @@ def prepare_for_spyre(model):
             cfg.num_attention_heads,
         )
 
+    cpu_submodules = []
     if hasattr(model, "classifier"):
-        model._spyre_cpu_submodules = ["classifier"]
+        cpu_submodules.append("classifier")
+    if hasattr(model, "qa_outputs"):
+        cpu_submodules.append("qa_outputs")
+    if cpu_submodules:
+        model._spyre_cpu_submodules = cpu_submodules
 
     model._spyre_compiled_blocks = [
         _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
