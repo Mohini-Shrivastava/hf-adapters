@@ -402,6 +402,13 @@ EMBEDDING_MODELS = {
         "adapter": "hf_mpnet.py",
         "size": "0.1b",
     },
+    # hf_distilbert.py
+    "distilbert_embed": {
+        "name": "DistilBERT base uncased",
+        "path": "distilbert/distilbert-base-uncased",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
 }
 
 
@@ -418,6 +425,19 @@ QUESTION_ANSWERING_MODELS = {
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1b",
     },
+    # hf_distilbert.py
+    "distilbert_qa_uncased": {
+        "name": "DistilBERT base uncased distilled SQuAD",
+        "path": "distilbert/distilbert-base-uncased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    "distilbert_qa_cased": {
+        "name": "DistilBERT base cased distilled SQuAD",
+        "path": "distilbert/distilbert-base-cased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
 }
 
 
@@ -427,6 +447,13 @@ MASKED_LM_MODELS = {
         "path": "google-bert/bert-base-uncased",
         "adapter": "hf_bert.py",
         "size": "0.1b",
+    },
+    # hf_distilbert.py
+    "distilbert_mlm": {
+        "name": "DistilBERT base uncased",
+        "path": "distilbert/distilbert-base-uncased",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
     },
     "modernbert_mlm": {
         "name": "ModernBERT base",
@@ -711,6 +738,13 @@ RERANKER_MODELS = {
         "path": "BAAI/bge-reranker-v2-m3",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.5b",
+    },
+    # hf_distilbert.py
+    "distilbert_sst2": {
+        "name": "DistilBERT base uncased finetuned SST-2",
+        "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
     },
 }
 

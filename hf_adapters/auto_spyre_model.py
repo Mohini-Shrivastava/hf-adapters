@@ -49,6 +49,7 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoModelForSequenceClassification,
     BertConfig,
+    DistilBertConfig,
     Gemma3Config,
     Gemma3TextConfig,
     Gemma4Config,
@@ -83,6 +84,7 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 from hf_adapters import (
     hf_bert,
+    hf_distilbert,
     hf_dspark_gemma4,
     hf_dspark_granite,
     hf_dspark_qwen3,
@@ -123,6 +125,7 @@ from hf_adapters.hf_common import (
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    DistilBertConfig: hf_distilbert,
     Gemma3Config: hf_gemma3,
     Gemma3TextConfig: hf_gemma3,
     Gemma4Config: hf_gemma4,
@@ -183,6 +186,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
 SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
+    DistilBertConfig: hf_distilbert,
     XLMRobertaConfig: hf_xlm_roberta,
     RobertaConfig: hf_xlm_roberta,
 }
@@ -560,6 +564,95 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
             )
 
         model.rerank = MethodType(model_rerank, model)  # type: ignore[assignment]
+        return model
+
+
+class DistilBertSpyreForSequenceClassification(AutoSpyreModelForSequenceClassification):
+    """Spyre-prepared ``DistilBertForSequenceClassification`` loader.
+
+    Named subclass of ``AutoSpyreModelForSequenceClassification`` pinned to
+    ``DistilBertConfig`` checkpoints.  Overrides ``from_pretrained`` to attach a
+    ``classify`` method that returns the full ``[B, num_labels]`` logit tensor —
+    unlike ``rerank`` (which returns a scalar ``[B]`` relevance score for
+    single-label rerankers) ``classify`` preserves all label logits so
+    ``argmax`` maps correctly to ``id2label``.
+
+    Example::
+
+        from hf_adapters import DistilBertSpyreForSequenceClassification
+        from transformers import DistilBertTokenizer
+
+        tokenizer = DistilBertTokenizer.from_pretrained(
+            "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+        )
+        model = DistilBertSpyreForSequenceClassification.from_pretrained(
+            "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+        )
+
+        scores = model.classify(tokenizer, ["Hello, my dog is cute"])
+        # scores: [B, num_labels] — e.g. tensor([[-4.05, 4.37]])
+        label = model.config.id2label[scores[0].argmax().item()]
+        print(label)  # → POSITIVE
+    """
+
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = {
+        DistilBertConfig: hf_distilbert,
+    }
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+        )
+        module = hf_distilbert
+
+        def model_classify(
+            tokenizer: Any,
+            texts: list[str],
+            **kwargs: Any,
+        ) -> torch.Tensor:
+            """Run sequence classification and return full ``[B, num_labels]`` logits.
+
+            Args:
+                tokenizer: A ``DistilBertTokenizer`` (or any compatible tokenizer).
+                texts: List of input strings to classify.
+
+            Returns:
+                ``[B, num_labels]`` float tensor on CPU — one row per input text,
+                one column per label.  Use ``argmax(dim=-1)`` to get predicted ids.
+            """
+            from hf_adapters.hf_common import prefill_encoder
+
+            encoded = tokenizer(
+                texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                padding_side="right",
+                return_attention_mask=True,
+            )
+            last_hidden_state = prefill_encoder(
+                module._run_backbone_forward,
+                model,
+                encoded["input_ids"],
+                encoded["attention_mask"],
+                token_type_ids=encoded.get("token_type_ids", None),
+            )
+            classifier = model.classifier
+            cls_device = next(classifier.parameters()).device
+            # classifier is _DistilBertClassifierHead: returns [B, num_labels]
+            logits = classifier(last_hidden_state.to(cls_device))
+            return logits.to("cpu")  # [B, num_labels]
+
+        # Use object.__setattr__ to bypass nn.Module's __setattr__, which only
+        # accepts Parameters / Modules / tensors — plain callables get silently
+        # dropped from __getattr__ lookups otherwise.
+        object.__setattr__(model, "classify", model_classify)
         return model
 
 

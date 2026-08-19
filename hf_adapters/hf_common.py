@@ -101,7 +101,15 @@ def get_backbone(model):
     inner = next(
         (
             backbone
-            for name in ("model", "transformer", "gpt_neox", "bert", "mpnet", "roberta")
+            for name in (
+                "model",
+                "transformer",
+                "gpt_neox",
+                "bert",
+                "distilbert",
+                "mpnet",
+                "roberta",
+            )
             if (backbone := getattr(model, name, None)) is not None
         ),
         model,
