@@ -739,6 +739,17 @@ RERANKER_MODELS = {
         "adapter": "hf_xlm_roberta.py",
         "size": "0.5b",
     },
+}
+
+RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
+# No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
+ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
+
+
+# Sequence-classification models — multi-label classifiers that return
+# ``[B, num_labels]`` logits.  Exercised by
+# ``tests/cpu/test_seq_classification_cpu_accuracy.py``.
+SEQ_CLASSIFICATION_MODELS = {
     # hf_distilbert.py
     "distilbert_sst2": {
         "name": "DistilBERT base uncased finetuned SST-2",
@@ -748,6 +759,7 @@ RERANKER_MODELS = {
     },
 }
 
-RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
-# No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
-ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
+SEQ_CLASSIFICATION_PATHS: list[str] = [
+    m["path"] for m in SEQ_CLASSIFICATION_MODELS.values()
+]
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = list(SEQ_CLASSIFICATION_PATHS)
