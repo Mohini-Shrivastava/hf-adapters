@@ -222,6 +222,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "question_answering": {},
         "reranker": {},
         "seq_classification": {},
+        "token_classification": {},
     }
     try:
         non_blocking = non_blocking_tables[harness]
