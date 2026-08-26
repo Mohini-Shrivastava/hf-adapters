@@ -2620,39 +2620,18 @@ def prefill_question_answering(
 
 
 # ---------------------------------------------------------------------------
-# Cross-encoder reranker prefill driver (XLM-RoBERTa / BGE reranker family)
+# Sequence-classification prefill driver
 # ---------------------------------------------------------------------------
 
 
-def prefill_reranker(
+def prefill_sequence_classification(
     run_encoder_forward_fn: Callable,
     model,
     input_ids,
     attention_mask,
     token_type_ids=None,
-):
-    """One-shot prefill for cross-encoder reranker models.
-
-    Runs the encoder backbone on Spyre via ``prefill_encoder``,
-    then applies the classification head (``model.classifier``) to produce a
-    scalar relevance score per query-document pair.
-
-    The classification head is run outside torch.compile on CPU to avoid:
-    - ``torch.bernoulli`` (Dropout) which the Spyre backend cannot lower.
-    - ``aten.slice`` for CLS extraction which does not lower on Spyre.
-    - ``out_proj: Linear(hidden, 1)`` whose output dim=1 is not stick-aligned.
-
-    Args:
-        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
-            token_type_ids) -> [B, padded_len, H]``.
-        model: Prepared ``XLMRobertaForSequenceClassification`` on Spyre.
-        input_ids: ``[B, L]`` token ids on CPU.
-        attention_mask: ``[B, L]`` mask on CPU.
-        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None.
-
-    Returns:
-        ``scores``: ``[B]`` float32 tensor on CPU — raw logits.
-    """
+) -> torch.Tensor:
+    """Run an encoder on Spyre and its sequence-classification head on CPU."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -2661,17 +2640,10 @@ def prefill_reranker(
         token_type_ids=token_type_ids,
     )
 
-    # Pass the full [B, L, H] hidden state to the classifier; .to(cls_device)
-    # moves it off Spyre to avoid aten.slice. The classification head does its
-    # own [:, 0, :] CLS extraction internally.
-
-    # Run the classification head on the same device it lives on
-    # (CPU — kept off Spyre via _spyre_cpu_submodules in prepare_for_spyre).
     classifier = model.classifier
     cls_device = next(classifier.parameters()).device
-    scores = classifier(last_hidden_state.to(cls_device))  # [B, 1]
-
-    return scores[:, 0].to("cpu")  # [B] raw logits on CPU
+    logits: torch.Tensor = classifier(last_hidden_state.to(cls_device))
+    return logits.to("cpu")
 
 
 # ---------------------------------------------------------------------------

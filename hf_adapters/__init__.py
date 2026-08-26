@@ -19,7 +19,6 @@ from hf_adapters.auto_spyre_model import (
     AutoSpyreModelForMaskedLM,
     AutoSpyreModelForQuestionAnswering,
     AutoSpyreModelForSequenceClassification,
-    DistilBertSpyreForSequenceClassification,
     AutoSpyreModelForTokenClassification,
 )
 
@@ -30,6 +29,5 @@ __all__ = [
     "AutoSpyreModelForMaskedLM",
     "AutoSpyreModelForQuestionAnswering",
     "AutoSpyreModelForSequenceClassification",
-    "DistilBertSpyreForSequenceClassification",
     "AutoSpyreModelForTokenClassification",
 ]

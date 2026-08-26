@@ -41,7 +41,7 @@ from hf_adapters.auto_spyre_model import (
     dtype_for_model_path,
     resolve_adapter_module,
 )
-from hf_adapters.hf_common import move_model_to_spyre, prefill_reranker
+from hf_adapters.hf_common import move_model_to_spyre, prefill_sequence_classification
 
 pytestmark = pytest.mark.model_harness("reranker")
 
@@ -122,13 +122,13 @@ def _run_reranker_test(model_path: str) -> dict:
 
     print("  Running adapter on Spyre ...")
     with torch.no_grad():
-        spyre_scores = prefill_reranker(
+        spyre_scores = prefill_sequence_classification(
             adapter._run_backbone_forward,
             model,
             input_ids,
             attention_mask,
             token_type_ids=token_type_ids,
-        ).float()
+        ).float()[:, 0]
     print(f"  Spyre scores: {spyre_scores.tolist()}")
 
     abs_diffs = (spyre_scores - ref_scores).abs()

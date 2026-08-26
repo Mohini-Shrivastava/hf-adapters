@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU accuracy test for ``DistilBertSpyreForSequenceClassification.classify()``.
+"""CPU accuracy test for standard sequence-classification forward on Spyre.
 
 Two test cases run for each registered sequence-classification model:
 
@@ -20,7 +20,7 @@ Two test cases run for each registered sequence-classification model:
     Loads the model via stock ``AutoModelForSequenceClassification`` on CPU,
     runs a reference forward to get ``[B, num_labels]`` logits, then loads a
     fresh copy, applies ``prepare_for_spyre`` + ``_unwrap_compiled_blocks``,
-    and calls ``prefill_encoder`` + the ``_DistilBertClassifierHead`` directly.
+    and calls ``prefill_sequence_classification`` directly.
     Asserts:
       - Output shape matches ``[B, num_labels]``
       - Per-label cosine similarity across the batch is >= threshold
@@ -28,8 +28,8 @@ Two test cases run for each registered sequence-classification model:
 
   test_auto_loader[<key>]
     Same comparison, but the adapter side goes through
-    ``DistilBertSpyreForSequenceClassification.from_pretrained`` and the
-    attached ``model.classify()`` method.
+    ``AutoSpyreModelForSequenceClassification.from_pretrained`` and standard HF
+    ``model(**encoded, return_dict=True)``.
 
 DEVICE is patched to ``"cpu"`` by ``tests/conftest.py``; torch.compile is
 unwrapped by ``_unwrap_compiled_blocks`` so blocks run eagerly.
@@ -45,6 +45,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from hf_adapters.auto_spyre_model import (
     SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    AutoSpyreModelForSequenceClassification,
 )
 from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 from tests.cpu.conftest import _unwrap_compiled_blocks
@@ -66,7 +67,7 @@ COSINE_THRESHOLD: float = 0.999
     "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
 )
 def test_manual_path(model_path: str) -> None:
-    """Adapter logits via prepare_for_spyre + prefill_encoder match HF reference."""
+    """Adapter logits via prepare_for_spyre + prefill_sequence_classification match HF reference."""
     hf_common_mod = sys.modules["hf_adapters.hf_common"]
     adapter_module = resolve_adapter_module_for_test(
         model_path,
@@ -106,18 +107,13 @@ def test_manual_path(model_path: str) -> None:
     _unwrap_compiled_blocks(model)
 
     with torch.no_grad():
-        last_hidden = hf_common_mod.prefill_encoder(
+        adapter_logits = hf_common_mod.prefill_sequence_classification(
             adapter_module._run_backbone_forward,
             model,
             encoded["input_ids"],
             encoded["attention_mask"],
             token_type_ids=encoded.get("token_type_ids", None),
-        )
-        classifier = model.classifier
-        cls_device = next(classifier.parameters()).device
-        adapter_logits = classifier(
-            last_hidden.to(cls_device)
-        ).float()  # [B, num_labels]
+        ).float()
 
     id2label = model.config.id2label
     del model
@@ -154,8 +150,7 @@ def test_manual_path(model_path: str) -> None:
     "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
 )
 def test_auto_loader(model_path: str) -> None:
-    """Logits via DistilBertSpyreForSequenceClassification.classify() match HF reference."""
-    auto_spyre_model_mod = sys.modules["hf_adapters.auto_spyre_model"]
+    """Standard sequence-classification forward via auto-loader matches HF reference."""
     adapter_module = resolve_adapter_module_for_test(
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
@@ -184,15 +179,11 @@ def test_auto_loader(model_path: str) -> None:
     gc.collect()
 
     # --- Auto-loader path ---
-    model = (
-        auto_spyre_model_mod.DistilBertSpyreForSequenceClassification.from_pretrained(
-            model_path
-        )
-    )
+    model = AutoSpyreModelForSequenceClassification.from_pretrained(model_path)
     _unwrap_compiled_blocks(model)
 
     with torch.no_grad():
-        adapter_logits = model.classify(tokenizer, TEXTS).float()  # [B, num_labels]
+        adapter_logits = model(**encoded, return_dict=True).logits.float()
 
     del model
     gc.collect()

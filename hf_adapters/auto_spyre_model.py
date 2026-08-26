@@ -83,6 +83,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import (
     MaskedLMOutput,
     QuestionAnsweringModelOutput,
+    SequenceClassifierOutput,
     TokenClassifierOutput,
 )
 from transformers.models.ministral.configuration_ministral import MinistralConfig
@@ -188,7 +189,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Mistral3Config: hf_mistral3_vision_mm,
 }
 
-# Sequence-classification (cross-encoder reranker) mapping — used by
+# Sequence-classification mapping — used by
 # ``AutoSpyreModelForSequenceClassification``.
 SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
@@ -546,21 +547,11 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
 
 
 class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
-    """Load an XLM-RoBERTa cross-encoder reranker and prepare it for Spyre.
+    """Load a sequence-classification model with its encoder on Spyre and head on CPU.
 
-    Loads via ``AutoModelForSequenceClassification``, compiles the encoder
-    backbone on Spyre, and attaches a ``rerank`` method that tokenizes
-    query-document pairs and returns raw relevance logits.
-
-    Example::
-
-        model = AutoSpyreModelForSequenceClassification.from_pretrained(
-            "BAAI/bge-reranker-v2-m3"
-        )
-        tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-v2-m3")
-        pairs = [("query text", "document text")]
-        scores = model.rerank(tokenizer, pairs)          # raw logits
-        probs  = torch.sigmoid(scores)                   # [0, 1] relevance
+    Loads via ``AutoModelForSequenceClassification`` and attaches a native
+    ``forward`` that accepts standard Hugging Face sequence-classification inputs
+    and returns a ``SequenceClassifierOutput`` with ``logits`` on CPU.
     """
 
     _auto_model_cls = AutoModelForSequenceClassification  # type: ignore[assignment]
@@ -582,67 +573,55 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
             model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
-        def model_rerank(
+        def model_forward(
             self: PreTrainedModel,
-            tokenizer: Any,
-            pairs: list[tuple[str, str]],
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            token_type_ids: torch.Tensor | None = None,
+            position_ids: torch.Tensor | None = None,
+            head_mask: torch.Tensor | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            labels: torch.Tensor | None = None,
+            output_attentions: bool | None = None,
+            output_hidden_states: bool | None = None,
+            return_dict: bool | None = None,
             **kwargs: Any,
         ):
-            from hf_adapters.hf_common import prefill_reranker
+            from hf_adapters.hf_common import prefill_sequence_classification
 
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-            encoded = tokenizer(
-                pairs,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                padding_side="right",
-                return_attention_mask=True,
+            if kwargs:
+                raise TypeError(f"Unsupported forward arguments: {sorted(kwargs)}")
+            _validate_encoder_task_forward(
+                self,
+                input_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
             )
-            return prefill_reranker(
+            if attention_mask is None and input_ids is not None:
+                attention_mask = torch.ones_like(input_ids)
+
+            logits = prefill_sequence_classification(
                 module._run_backbone_forward,
                 self,
-                encoded["input_ids"],
-                encoded["attention_mask"],
-                token_type_ids=encoded.get("token_type_ids", None),
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
             )
+            use_return_dict = (
+                return_dict if return_dict is not None else self.config.use_return_dict
+            )
+            if use_return_dict:
+                return SequenceClassifierOutput(
+                    logits=logits.float()  # type: ignore[arg-type]
+                )
+            return (logits,)
 
-        model.rerank = MethodType(model_rerank, model)  # type: ignore[assignment]
+        model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
         return model
-
-
-class DistilBertSpyreForSequenceClassification(AutoSpyreModelForSequenceClassification):
-    """Spyre-prepared ``DistilBertForSequenceClassification`` loader.
-
-    Named subclass of ``AutoSpyreModelForSequenceClassification`` pinned to
-    ``DistilBertConfig`` checkpoints.  Overrides ``from_pretrained`` to attach a
-    ``classify`` method that returns the full ``[B, num_labels]`` logit tensor —
-    unlike ``rerank`` (which returns a scalar ``[B]`` relevance score for
-    single-label rerankers) ``classify`` preserves all label logits so
-    ``argmax`` maps correctly to ``id2label``.
-
-    Example::
-
-        from hf_adapters import DistilBertSpyreForSequenceClassification
-        from transformers import DistilBertTokenizer
-
-        tokenizer = DistilBertTokenizer.from_pretrained(
-            "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
-        )
-        model = DistilBertSpyreForSequenceClassification.from_pretrained(
-            "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
-        )
-
-        scores = model.classify(tokenizer, ["Hello, my dog is cute"])
-        # scores: [B, num_labels] — e.g. tensor([[-4.05, 4.37]])
-        label = model.config.id2label[scores[0].argmax().item()]
-        print(label)  # → POSITIVE
-    """
-
-    _module_mapping: dict[type[PretrainedConfig], ModuleType] = {
-        DistilBertConfig: hf_distilbert,
-    }
 
 
 class AutoSpyreModelForTokenClassification(AutoSpyreModel):

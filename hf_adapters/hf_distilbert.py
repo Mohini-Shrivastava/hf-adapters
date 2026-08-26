@@ -36,16 +36,17 @@ Key differences from BERT (``hf_bert``) handled here:
 
 Usage::
 
-    from hf_adapters import DistilBertSpyreForSequenceClassification
+    from hf_adapters import AutoSpyreModelForSequenceClassification
     from transformers import DistilBertTokenizer
 
     tokenizer = DistilBertTokenizer.from_pretrained(
         "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
     )
-    model = DistilBertSpyreForSequenceClassification.from_pretrained(
+    model = AutoSpyreModelForSequenceClassification.from_pretrained(
         "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
     )
-    scores = model.classify(tokenizer, ["Hello, my dog is cute"])
+    encoded = tokenizer(["Hello, my dog is cute"], return_tensors="pt")
+    scores = model(**encoded, return_dict=True).logits
     label = model.config.id2label[scores[0].argmax().item()]
     print(label)  # → POSITIVE
 """
@@ -111,19 +112,18 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
 
 
 _is_encoder_only = True
-_is_reranker = True
 
 
 class _DistilBertClassifierHead(nn.Module):
     """Wraps DistilBERT's two-stage classification head into a single callable.
 
-    ``prefill_reranker`` calls ``model.classifier(last_hidden_state)`` where
+    ``prefill_sequence_classification`` calls ``model.classifier(last_hidden_state)`` where
     ``last_hidden_state`` is ``[B, L, H]``. XLM-RoBERTa's
     ``RobertaClassificationHead`` already does its own CLS slice internally.
     DistilBERT splits the head into ``pre_classifier`` (Linear + ReLU) and
     ``classifier`` (Linear) with CLS extraction happening in the model's forward
-    method. This wrapper reunites them so the ``prefill_reranker`` call-site is
-    unchanged.
+    method. This wrapper reunites them so the ``prefill_sequence_classification``
+    call-site is unchanged.
     """
 
     def __init__(self, pre_classifier: nn.Module, classifier: nn.Module) -> None:
@@ -151,7 +151,8 @@ def prepare_for_spyre(model):
     For ``DistilBertForSequenceClassification``, replaces ``model.classifier``
     with a ``_DistilBertClassifierHead`` that combines CLS extraction,
     ``pre_classifier``, and ``classifier`` into the single
-    ``classifier(hidden_states)`` call-site that ``prefill_reranker`` expects.
+    ``classifier(hidden_states)`` call-site that
+    ``prefill_sequence_classification`` expects.
     """
     backbone = model.distilbert
     cfg = model.config
@@ -182,7 +183,7 @@ def prepare_for_spyre(model):
         model._spyre_head_dim = padded
 
     # For DistilBertForSequenceClassification: wrap the two-stage head so
-    # prefill_reranker's ``model.classifier(hidden_states)`` works correctly.
+    # ``prefill_sequence_classification(model.classifier(hidden_states))`` works.
     if hasattr(model, "pre_classifier") and hasattr(model, "classifier"):
         model.classifier = _DistilBertClassifierHead(
             model.pre_classifier, model.classifier
