@@ -1239,7 +1239,7 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
         shape = (batch_size, n_kv, max_cache_len, head_dim)
         if stl is None:
             return torch.zeros(shape, dtype=dtype, device=device)
-        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload]
+        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload, annotation-unchecked]
             shape,
             device=torch.device(device),
             device_layout=stl,

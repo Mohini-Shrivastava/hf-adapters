@@ -135,7 +135,8 @@ class _DistilBertClassifierHead(nn.Module):
         pooled = hidden_states[:, 0]  # [B, H] — CLS token
         pooled = self.pre_classifier(pooled)
         pooled = torch.relu(pooled)
-        return self.classifier(pooled)  # [B, num_labels]
+        result: torch.Tensor = self.classifier(pooled)  # [B, num_labels]
+        return result
 
 
 def prepare_for_spyre(model):

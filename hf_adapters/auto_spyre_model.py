@@ -64,7 +64,7 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
-    GraniteSWAConfig,
+    GraniteSWAConfig,  # type: ignore[attr-defined]
     LlamaConfig,
     MistralConfig,
     ModernBertConfig,
@@ -643,6 +643,8 @@ class DistilBertSpyreForSequenceClassification(AutoSpyreModelForSequenceClassifi
     _module_mapping: dict[type[PretrainedConfig], ModuleType] = {
         DistilBertConfig: hf_distilbert,
     }
+
+
 class AutoSpyreModelForTokenClassification(AutoSpyreModel):
     """Load a token-classification model with its encoder on Spyre and head on CPU.
 
@@ -676,7 +678,7 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = torch.float16,
         tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         model: PreTrainedModel = super().from_pretrained(
@@ -717,24 +719,16 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
                 token_type_ids=encoded.get("token_type_ids", None),
             )
             classifier = model.classifier
+            assert isinstance(classifier, torch.nn.Module)
             cls_device = next(classifier.parameters()).device
             # classifier is _DistilBertClassifierHead: returns [B, num_labels]
-            logits = classifier(last_hidden_state.to(cls_device))
+            logits: torch.Tensor = classifier(last_hidden_state.to(cls_device))
             return logits.to("cpu")  # [B, num_labels]
 
         # Use object.__setattr__ to bypass nn.Module's __setattr__, which only
         # accepts Parameters / Modules / tensors — plain callables get silently
         # dropped from __getattr__ lookups otherwise.
         object.__setattr__(model, "classify", model_classify)
-        dtype: torch.dtype | None = None,
-        tp_plan: Optional[Union[dict, str]] = None,
-    ) -> PreTrainedModel:
-        module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
-        )
-        model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
-        )
 
         def model_forward(
             self: PreTrainedModel,
