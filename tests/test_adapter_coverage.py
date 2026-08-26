@@ -102,6 +102,10 @@ def get_registered_adapters():
 
     # Collect adapters from SEQ_CLASSIFICATION_MODELS
     for model_info in SEQ_CLASSIFICATION_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
     # Collect adapters from TOKEN_CLASSIFICATION_MODELS
     for model_info in TOKEN_CLASSIFICATION_MODELS.values():
         adapter = model_info.get("adapter")
