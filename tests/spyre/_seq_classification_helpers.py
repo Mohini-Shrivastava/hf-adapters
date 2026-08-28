@@ -27,11 +27,11 @@ from __future__ import annotations
 import types
 
 import torch
-from conftest import load_ref_model
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import move_model_to_spyre, prefill_sequence_classification
+from tests.conftest import load_ref_model
 
 
 def run_seq_classification_cpu_vs_spyre(
