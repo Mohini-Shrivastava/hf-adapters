@@ -658,57 +658,15 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype | None = torch.float16,
+        dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, mapping=cls._module_mapping
+        )
         model: PreTrainedModel = super().from_pretrained(
             model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
-        module = hf_distilbert
-
-        def model_classify(
-            tokenizer: Any,
-            texts: list[str],
-            **kwargs: Any,
-        ) -> torch.Tensor:
-            """Run sequence classification and return full ``[B, num_labels]`` logits.
-
-            Args:
-                tokenizer: A ``DistilBertTokenizer`` (or any compatible tokenizer).
-                texts: List of input strings to classify.
-
-            Returns:
-                ``[B, num_labels]`` float tensor on CPU — one row per input text,
-                one column per label.  Use ``argmax(dim=-1)`` to get predicted ids.
-            """
-            from hf_adapters.hf_common import prefill_encoder
-
-            encoded = tokenizer(
-                texts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                padding_side="right",
-                return_attention_mask=True,
-            )
-            last_hidden_state = prefill_encoder(
-                module._run_backbone_forward,
-                model,
-                encoded["input_ids"],
-                encoded["attention_mask"],
-                token_type_ids=encoded.get("token_type_ids", None),
-            )
-            classifier = model.classifier
-            assert isinstance(classifier, torch.nn.Module)
-            cls_device = next(classifier.parameters()).device
-            # classifier is _DistilBertClassifierHead: returns [B, num_labels]
-            logits: torch.Tensor = classifier(last_hidden_state.to(cls_device))
-            return logits.to("cpu")  # [B, num_labels]
-
-        # Use object.__setattr__ to bypass nn.Module's __setattr__, which only
-        # accepts Parameters / Modules / tensors — plain callables get silently
-        # dropped from __getattr__ lookups otherwise.
-        object.__setattr__(model, "classify", model_classify)
 
         def model_forward(
             self: PreTrainedModel,

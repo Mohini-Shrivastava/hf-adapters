@@ -52,7 +52,7 @@ class SpyreNoAdapterError(ValueError):
 
 
 def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose ``hidden_size``/``intermediate_size`` is stick-misaligned.
+    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -62,16 +62,33 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``);
-    ``hidden_size``/``intermediate_size`` can't be padded without changing the
-    model's arithmetic. Real models clear this bar; it fires on tiny test
-    fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
+    intermediate dims can't be padded without changing the model's arithmetic.
+    Real models clear this bar; it fires on tiny test fixtures (e.g.
+    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+
+    Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
+    ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
     """
     dim_config = text_config(config)
     misaligned = [
-        (f, v)
-        for f in ("hidden_size", "intermediate_size")
-        if (v := getattr(dim_config, f, None)) is not None and v % BLOCK_SIZE != 0
+        (label, v)
+        for label, candidates in (
+            ("hidden_size", ("hidden_size", "dim")),
+            ("intermediate_size", ("intermediate_size", "hidden_dim")),
+        )
+        if (
+            v := next(
+                (
+                    getattr(dim_config, f)
+                    for f in candidates
+                    if getattr(dim_config, f, None) is not None
+                ),
+                None,
+            )
+        )
+        is not None
+        and v % BLOCK_SIZE != 0
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
@@ -103,12 +120,12 @@ def get_backbone(model):
             backbone
             for name in (
                 "model",
-                "transformer",
                 "gpt_neox",
                 "bert",
                 "distilbert",
                 "mpnet",
                 "roberta",
+                "transformer",
             )
             if (backbone := getattr(model, name, None)) is not None
         ),

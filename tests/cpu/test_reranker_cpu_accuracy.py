@@ -14,23 +14,18 @@
 
 """CPU accuracy test for sequence-classification models used as rerankers.
 
-Two parametrised cases per registered sequence-classification reranker:
-
-  test_manual_path[<key>]
-    Loads the model fresh via ``AutoModelForSequenceClassification`` (stock HF),
-    runs a reference forward to get logits, then loads a second copy, applies
-    ``prepare_for_spyre``, unwraps compiled blocks (CPU mode), and calls
-    ``prefill_sequence_classification``. Asserts:
-      - Output shape matches ``[B, num_labels]``
-      - The first-label logits are within an absolute tolerance of 0.05 of the
-        HF reference
-      - Ranking order induced by the first-label logits is preserved
+One test case per registered reranker:
 
   test_auto_loader[<key>]
-    Same comparison but the adapter side goes through
-    ``AutoSpyreModelForSequenceClassification.from_pretrained`` and standard HF
-    ``model(**encoded, return_dict=True)``. Exercises the full end-to-end
-    auto-loading path.
+    Loads a stock HF reference on CPU, runs a forward to get logits, then loads
+    via ``AutoSpyreModelForSequenceClassification.from_pretrained`` and calls
+    ``model(**encoded, return_dict=True)``.  Asserts:
+      - Output shape matches ``[B, num_labels]``
+      - First-label logits are within an absolute tolerance of 0.05 of HF reference
+      - Ranking order induced by the first-label logits is preserved
+
+Execution is delegated to ``_seq_classification_helpers``; this file owns only
+the reranker-specific inputs and ranking-order assertions.
 
 DEVICE is patched to ``"cpu"`` by ``tests/conftest.py``; torch.compile is
 unwrapped by ``_unwrap_compiled_blocks`` so blocks run eagerly.
@@ -40,15 +35,8 @@ import gc
 
 import pytest
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from _seq_classification_helpers import run_seq_classification_auto_loader_vs_ref
 
-from hf_adapters.auto_spyre_model import (
-    SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module,
-)
-from hf_adapters.hf_common import prefill_sequence_classification
-from tests.conftest import load_ref_model
-from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import RERANKER_PATHS
 
 pytestmark = pytest.mark.model_harness("reranker")
@@ -68,76 +56,10 @@ PAIRS: list[tuple[str, str]] = [
 SCORE_ATOL: float = 0.05
 
 
-def _hf_reference_logits(
-    model_path: str,
-    pairs: list[tuple[str, str]],
-) -> torch.Tensor:
-    """Run stock HF forward on CPU and return sequence-classification logits."""
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    ref_model = load_ref_model(
-        model_path=model_path,
-        auto_model_cls=AutoModelForSequenceClassification,
-    )
-    ref_model.eval()
-
-    encoded = tokenizer(
-        pairs,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        padding_side="right",
-        return_attention_mask=True,
-    )
-    with torch.no_grad():
-        out = ref_model(
-            input_ids=encoded["input_ids"],
-            attention_mask=encoded["attention_mask"],
-            return_dict=True,
-        )
-    return out.logits.float()
-
-
-@pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
-def test_manual_path(model_path: str) -> None:
-    """Adapter logits via prepare_for_spyre + prefill_sequence_classification match HF reference."""
-    adapter_module = resolve_adapter_module(
-        model_path,
-        mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-    # --- HF reference ---
-    ref_logits = _hf_reference_logits(model_path, PAIRS)
-    gc.collect()
-
-    # --- Adapter path ---
-    model = load_ref_model(
-        model_path=model_path,
-        auto_model_cls=AutoModelForSequenceClassification,
-    )
-    adapter_module.prepare_for_spyre(model)
-    _unwrap_compiled_blocks(model)
-
-    encoded = tokenizer(
-        PAIRS,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        padding_side="right",
-        return_attention_mask=True,
-    )
-    with torch.no_grad():
-        adapter_logits = prefill_sequence_classification(
-            adapter_module._run_backbone_forward,
-            model,
-            encoded["input_ids"],
-            encoded["attention_mask"],
-            token_type_ids=encoded.get("token_type_ids", None),
-        ).float()
-
-    del model
-    gc.collect()
-
+def _assert_reranker_logits(
+    ref_logits: torch.Tensor,
+    adapter_logits: torch.Tensor,
+) -> None:
     assert (
         adapter_logits.shape == ref_logits.shape
     ), f"logit shape mismatch: adapter {adapter_logits.shape} vs ref {ref_logits.shape}"
@@ -158,52 +80,9 @@ def test_manual_path(model_path: str) -> None:
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
 def test_auto_loader(model_path: str) -> None:
-    """Standard sequence-classification forward via auto-loader matches HF reference."""
-    import sys
-
-    auto_spyre_model_mod = sys.modules["hf_adapters.auto_spyre_model"]
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-    # --- HF reference ---
-    ref_logits = _hf_reference_logits(model_path, PAIRS)
+    """AutoSpyreModelForSequenceClassification logits match HF CPU reference."""
+    ref_logits, adapter_logits = run_seq_classification_auto_loader_vs_ref(
+        model_path, PAIRS
+    )
     gc.collect()
-
-    # --- Auto-loader path ---
-    model = (
-        auto_spyre_model_mod.AutoSpyreModelForSequenceClassification.from_pretrained(
-            model_path
-        )
-    )
-    _unwrap_compiled_blocks(model)
-
-    encoded = tokenizer(
-        PAIRS,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        padding_side="right",
-        return_attention_mask=True,
-    )
-    with torch.no_grad():
-        adapter_logits = model(**encoded, return_dict=True).logits.float()
-
-    del model
-    gc.collect()
-
-    assert (
-        adapter_logits.shape == ref_logits.shape
-    ), f"logit shape mismatch: adapter {adapter_logits.shape} vs ref {ref_logits.shape}"
-
-    ref_scores = ref_logits[:, 0]
-    adapter_scores = adapter_logits[:, 0]
-    max_abs_diff = (adapter_scores - ref_scores).abs().max().item()
-    assert max_abs_diff <= SCORE_ATOL, (
-        f"max absolute score difference {max_abs_diff:.4f} exceeds {SCORE_ATOL}.\n"
-        f"  ref    = {ref_scores.tolist()}\n"
-        f"  adapter= {adapter_scores.tolist()}"
-    )
-    ref_order = torch.argsort(ref_scores, descending=True).tolist()
-    adapter_order = torch.argsort(adapter_scores, descending=True).tolist()
-    assert (
-        ref_order == adapter_order
-    ), f"ranking order mismatch: ref {ref_order} vs adapter {adapter_order}"
+    _assert_reranker_logits(ref_logits, adapter_logits)

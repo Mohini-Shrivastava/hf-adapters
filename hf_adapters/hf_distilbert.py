@@ -58,6 +58,7 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
+    get_backbone,
     make_encoder_block,
 )
 
@@ -91,15 +92,16 @@ def _make_compiled_encoder_block(layer):
 def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward for DistilBERT.
 
-    Departs from ``encoder_backbone_forward`` in two places:
+    Uses ``get_backbone`` so the function works both when ``model`` is a
+    task-wrapper (``DistilBertForSequenceClassification``, etc., which carry a
+    ``.distilbert`` sub-module) and when it is the bare backbone itself
+    (``DistilBertModel``, returned by ``AutoModel``).
 
-    - The backbone is ``model.distilbert``, not reached via ``get_backbone``'s
-      standard attribute search (which covers ``bert`` / ``roberta`` etc.).
-    - ``token_type_ids`` is unused — DistilBERT has no token-type embedding table.
-      The parameter is retained so ``prefill_encoder`` can dispatch through the
-      same callable shape as BERT/XLM-R.
+    ``token_type_ids`` is unused — DistilBERT has no token-type embedding table.
+    The parameter is retained so ``prefill_encoder`` can dispatch through the
+    same callable shape as BERT/XLM-R.
     """
-    backbone = model.distilbert
+    backbone = get_backbone(model)
     emb = backbone.embeddings
     h = emb.word_embeddings(input_ids) + emb.position_embeddings(position_ids)
     h = emb.LayerNorm(h)
@@ -154,7 +156,7 @@ def prepare_for_spyre(model):
     ``classifier(hidden_states)`` call-site that
     ``prefill_sequence_classification`` expects.
     """
-    backbone = model.distilbert
+    backbone = get_backbone(model)
     cfg = model.config
     orig_head_dim = cfg.dim // cfg.n_heads
     stick_aligned_head_dim = (

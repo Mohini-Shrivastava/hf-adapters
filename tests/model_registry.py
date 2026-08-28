@@ -464,13 +464,6 @@ MASKED_LM_MODELS = {
         "adapter": "hf_bert.py",
         "size": "0.1b",
     },
-    # hf_distilbert.py
-    "distilbert_mlm": {
-        "name": "DistilBERT base uncased",
-        "path": "distilbert/distilbert-base-uncased",
-        "adapter": "hf_distilbert.py",
-        "size": "0.07b",
-    },
     "modernbert_mlm": {
         "name": "ModernBERT base",
         "path": "answerdotai/ModernBERT-base",
@@ -817,9 +810,20 @@ SEQ_CLASSIFICATION_MODELS = {
         "adapter": "hf_distilbert.py",
         "size": "0.07b",
     },
+    # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
+    "roberta_mnli": {
+        "name": "RoBERTa large MNLI",
+        "path": "FacebookAI/roberta-large-mnli",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.36b",
+    },
 }
 
-SEQ_CLASSIFICATION_PATHS: list[str] = [
-    m["path"] for m in SEQ_CLASSIFICATION_MODELS.values()
-]
-ALL_SEQ_CLASSIFICATION_PATHS: list[str] = list(SEQ_CLASSIFICATION_PATHS)
+SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)

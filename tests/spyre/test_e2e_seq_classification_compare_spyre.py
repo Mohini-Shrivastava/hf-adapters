@@ -17,12 +17,14 @@ E2E sequence-classification accuracy: HF stock forward (CPU) vs adapter (Spyre).
 
 For each registered sequence-classification model, loads the model on CPU,
 runs a reference forward to get ``[B, num_labels]`` logits, moves the same
-model instance to Spyre, runs the adapter forward via standard Hugging Face
-``model(**encoded, return_dict=True)``, and asserts that:
+model instance to Spyre, runs the adapter forward, and asserts that:
 
   - Output shape matches ``[B, num_labels]``
   - Per-sample cosine similarity over the label dimension is >= threshold
   - Predicted class ids match exactly between CPU and Spyre
+
+Execution is delegated to ``_seq_classification_helpers.run_seq_classification_cpu_vs_spyre``;
+this file owns only the seq-classification-specific inputs and cosine assertions.
 
 Usage (on Spyre LPAR)::
 
@@ -34,22 +36,16 @@ Usage (on Spyre LPAR)::
         -k distilbert
 """
 
-import gc
-
 import pytest
 import torch
 import torch.nn.functional as F
-from conftest import load_ref_model
+from _seq_classification_helpers import run_seq_classification_cpu_vs_spyre
 from model_registry import SEQ_CLASSIFICATION_PATHS
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from hf_adapters.auto_spyre_model import (
     SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    AutoSpyreModelForSequenceClassification,
-    dtype_for_model_path,
     resolve_adapter_module,
 )
-from hf_adapters.hf_common import move_model_to_spyre, prefill_sequence_classification
 
 pytestmark = pytest.mark.model_harness("seq_classification")
 
@@ -66,149 +62,21 @@ COSINE_THRESHOLD: float = 0.99
 @pytest.mark.parametrize(
     "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
 )
-def test_manual_path(model_path: str) -> None:
-    """Adapter logits via prepare_for_spyre + prefill_sequence_classification match HF CPU reference."""
+def test_e2e_seq_classification_compare_spyre(model_path: str) -> None:
     adapter = resolve_adapter_module(
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     )
-    dtype = dtype_for_model_path(model_path, target_device="spyre")
+    result = run_seq_classification_cpu_vs_spyre(model_path, adapter, TEXTS)
 
-    print(f"\n{'=' * 70}")
-    print(f"  {model_path}  dtype={dtype}")
-    print(f"{'=' * 70}")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    encoded = tokenizer(
-        TEXTS,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        padding_side="right",
-        return_attention_mask=True,
-    )
-    input_ids = encoded["input_ids"]
-    attention_mask = encoded["attention_mask"]
-    token_type_ids = encoded.get("token_type_ids", None)
-
-    # --- HF reference on CPU ---
-    model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter,
-        auto_model_cls=AutoModelForSequenceClassification,
-    )
-    print("  Running HF reference on CPU ...")
-    with torch.no_grad():
-        ref_logits = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
-        ).logits.float()  # [B, num_labels]
-    print(f"  HF logits:\n{ref_logits.tolist()}")
-    ref_ids = ref_logits.argmax(dim=-1)
-
-    # --- Adapter on Spyre ---
-    move_model_to_spyre(model=model, module=adapter, dtype=dtype)
-
-    print("  Running adapter on Spyre ...")
-    with torch.no_grad():
-        spyre_logits = prefill_sequence_classification(
-            adapter._run_backbone_forward,
-            model,
-            input_ids,
-            attention_mask,
-            token_type_ids=token_type_ids,
-        ).float()
-    print(f"  Spyre logits:\n{spyre_logits.tolist()}")
-
-    del model
-    gc.collect()
-
-    spyre_ids = spyre_logits.argmax(dim=-1)
-    cos = F.cosine_similarity(spyre_logits, ref_logits, dim=-1)  # [B]
-    id2label = {i: str(i) for i in range(ref_logits.shape[-1])}
-
-    print("\n## Seq Classification: HF (CPU) vs Adapter (Spyre) — manual path\n")
-    print("| Text | HF Label | Spyre Label | Cosine | Match |")
-    print("|------|----------|-------------|--------|-------|")
-    for text, ref_id, spyre_id, c in zip(TEXTS, ref_ids, spyre_ids, cos):
-        match = "Yes" if ref_id.item() == spyre_id.item() else "No"
-        print(
-            f"| {text} | {id2label.get(ref_id.item(), ref_id.item())} "
-            f"| {id2label.get(spyre_id.item(), spyre_id.item())} "
-            f"| {c.item():.6f} | {match} |"
-        )
-
-    assert (
-        spyre_logits.shape == ref_logits.shape
-    ), f"shape mismatch: spyre {spyre_logits.shape} vs ref {ref_logits.shape}"
-    assert torch.isfinite(spyre_logits).all()
-    assert cos.min().item() >= COSINE_THRESHOLD, (
-        f"min per-sample cosine {cos.min().item():.6f} < threshold {COSINE_THRESHOLD}\n"
-        f"  HF logits    : {ref_logits.tolist()}\n"
-        f"  Spyre logits : {spyre_logits.tolist()}"
-    )
-    assert torch.equal(spyre_ids, ref_ids), (
-        f"predicted class mismatch.\n"
-        f"  HF ids    : {ref_ids.tolist()}\n"
-        f"  Spyre ids : {spyre_ids.tolist()}"
-    )
-
-
-@pytest.mark.parametrize(
-    "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
-)
-def test_auto_loader(model_path: str) -> None:
-    """Standard sequence-classification forward via auto-loader matches HF CPU reference."""
-    dtype = dtype_for_model_path(model_path, target_device="cpu")
-
-    print(f"\n{'=' * 70}")
-    print(f"  {model_path}  dtype={dtype}")
-    print(f"{'=' * 70}")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    encoded = tokenizer(
-        TEXTS,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        padding_side="right",
-        return_attention_mask=True,
-    )
-
-    # --- HF reference on CPU ---
-    print("  Running HF reference on CPU ...")
-    ref_model = AutoModelForSequenceClassification.from_pretrained(
-        model_path,
-        dtype=dtype,
-        device_map="cpu",
-    ).eval()
-    with torch.no_grad():
-        ref_logits = ref_model(
-            **encoded, return_dict=True
-        ).logits.float()  # [B, num_labels]
-    print(f"  HF logits:\n{ref_logits.tolist()}")
-    del ref_model
-    gc.collect()
-
-    # --- Auto-loader path on Spyre ---
-    print("  Running AutoSpyreModelForSequenceClassification forward on Spyre ...")
-    model = AutoSpyreModelForSequenceClassification.from_pretrained(
-        model_path,
-        dtype=dtype_for_model_path(model_path, target_device="spyre"),
-    )
-    with torch.no_grad():
-        spyre_logits = model(**encoded, return_dict=True).logits.float()
-    print(f"  Spyre logits:\n{spyre_logits.tolist()}")
-
-    del model
-    gc.collect()
+    ref_logits = result["ref_logits"]
+    spyre_logits = result["spyre_logits"]
 
     ref_ids = ref_logits.argmax(dim=-1)
     spyre_ids = spyre_logits.argmax(dim=-1)
     cos = F.cosine_similarity(spyre_logits, ref_logits, dim=-1)  # [B]
 
-    print("\n## Seq Classification: HF (CPU) vs Adapter (Spyre) — auto-loader path\n")
+    print("\n## Seq Classification: HF (CPU) vs Adapter (Spyre)\n")
     print("| Text | HF id | Spyre id | Cosine | Match |")
     print("|------|-------|----------|--------|-------|")
     for text, ref_id, spyre_id, c in zip(TEXTS, ref_ids, spyre_ids, cos):
