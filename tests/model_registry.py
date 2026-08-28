@@ -402,13 +402,6 @@ EMBEDDING_MODELS = {
         "adapter": "hf_mpnet.py",
         "size": "0.1b",
     },
-    # hf_distilbert.py
-    "distilbert_embed": {
-        "name": "DistilBERT base uncased",
-        "path": "distilbert/distilbert-base-uncased",
-        "adapter": "hf_distilbert.py",
-        "size": "0.07b",
-    },
 }
 
 
