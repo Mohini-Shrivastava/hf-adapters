@@ -611,14 +611,12 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
                 input_ids,
                 attention_mask,
                 token_type_ids=token_type_ids,
-            )
+            ).float()
             use_return_dict = (
                 return_dict if return_dict is not None else self.config.use_return_dict
             )
             if use_return_dict:
-                return SequenceClassifierOutput(
-                    logits=logits.float()  # type: ignore[arg-type]
-                )
+                return SequenceClassifierOutput(logits=logits)  # type: ignore[arg-type]
             return (logits,)
 
         model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
@@ -705,12 +703,12 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
                 input_ids,
                 attention_mask,
                 token_type_ids=token_type_ids,
-            )
+            ).float()
             use_return_dict = (
                 return_dict if return_dict is not None else self.config.use_return_dict
             )
             if use_return_dict:
-                return TokenClassifierOutput(logits=logits.float())  # type: ignore[arg-type]
+                return TokenClassifierOutput(logits=logits)  # type: ignore[arg-type]
             return (logits,)
 
         model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
