@@ -43,10 +43,6 @@ both sharing the Pixtral vision tower but distinguished by their
 - ``"ministral3"``  — e.g. ``mistralai/Ministral-3-14B-Instruct-2512``
   (blocked-FP8 checkpoint, dequantized on load; uses ``Ministral3RMSNorm``)
 
-``prepare_for_spyre`` auto-detects the RMSNorm class by inspecting the first
-decoder layer — the same strategy used by ``hf_mistral3.prepare_for_spyre``
-for the text-only path.
-
 Mistral3 uses a **flat single-injection** pattern (contrast with Granite
 Vision's deepstack multi-layer injection):
 
@@ -78,13 +74,13 @@ from hf_adapters.hf_common import (
     build_decode_mask,
     build_prefill_mask,
     decode_block_walk,
+    generation_begin_index,
     generation_cache_len,
     get_backbone,
     get_model_dtype,
     make_cache_index,
     pad_and_position,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
     select_next_token,
@@ -102,14 +98,9 @@ def prepare_for_spyre(model):
     blocks, head padding, CPU patch-embed, 2D RoPE matrices).
     Text decoder → standard-GQA RoPE/head prep + compiled Mistral blocks +
     padded LM head, mirroring ``hf_mistral3.prepare_for_spyre`` but applied
-    against the VLM's nested text backbone.
-
-    The RMSNorm class is auto-detected from the first decoder layer to cover
-    both the ``mistral`` variant (``MistralRMSNorm``) and the ``ministral3``
-    variant (``Ministral3RMSNorm``, e.g. Ministral-3-14B-Instruct-2512).
+    against the VLM's nested text backbone. Covers both the ``mistral`` and
+    ``ministral3`` text variants.
     """
-    from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
-    from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
     # --- Vision tower ---
     hf_pixtral_vision.prepare_for_spyre(model)
@@ -128,21 +119,11 @@ def prepare_for_spyre(model):
     # does: call the constituent parts individually and store text blocks in
     # model._spyre_text_blocks.
     prepare_rope_and_heads(model)
-
-    # Detect the correct RMSNorm class from the first decoder layer's norm.
-    # Ministral3 text backbone uses Ministral3RMSNorm; Mistral-Small uses
-    # MistralRMSNorm.  Checking the live instance avoids hard-coding the
-    # text_config.model_type string and mirrors hf_mistral3.prepare_for_spyre.
-    first_norm = get_backbone(model).layers[0].input_layernorm
-    rmsnorm_cls = (
-        MistralRMSNorm if isinstance(first_norm, MistralRMSNorm) else Ministral3RMSNorm
-    )
-    patch_rmsnorm(rmsnorm_cls)
-
     pad_lm_head(model)
 
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +234,6 @@ def _run_text_backbone(
     a CPU additive scatter before the first decoder layer. Decode steps pass
     ``image_features=None`` (pure text).
     """
-    backbone = get_backbone(model)
     h = inputs_embeds
 
     # Single flat injection before layer 0 (unlike Granite's per-layer deepstack)
@@ -270,7 +250,7 @@ def _run_text_backbone(
             value_caches[i],
             cache_index,
         )
-    return backbone.norm(h)
+    return model._spyre_compiled_norm(h)
 
 
 def _logits_from_embeds(
@@ -402,6 +382,7 @@ def generate(
     temperature=None,
     top_k=None,
     top_p=None,
+    generation_config=None,
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
@@ -422,27 +403,30 @@ def generate(
     Returns a list of decoded strings (one per batch row), EOS-trimmed.
     """
     tokenizer = processor.tokenizer
-    params = _resolve_generation_params(
+    cfg, eos_ids, _ = _resolve_generation_params(
         model,
-        tokenizer,
+        generation_config,
         {
             "do_sample": do_sample,
             "temperature": temperature,
             "top_k": top_k,
             "top_p": top_p,
         },
+        {},
     )
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
+    do_sample = cfg.do_sample
+    temperature = cfg.temperature
+    top_k = cfg.top_k
+    top_p = cfg.top_p
 
     backbone = get_backbone(model)
     model_dtype = get_model_dtype(model)
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
+    begin_suppress_index = generation_begin_index(
+        prompt_length, cfg.forced_bos_token_id
+    )
 
     max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
@@ -511,7 +495,16 @@ def generate(
 
         # Token selection (CPU) — mirrors hf_common.generate.
         next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
+            next_logits,
+            do_sample,
+            temperature,
+            top_k,
+            top_p,
+            cfg.suppress_tokens,
+            cfg.begin_suppress_tokens,
+            cfg.forced_bos_token_id,
+            current_length=prompt_length + i,
+            begin_suppress_index=begin_suppress_index,
         )
 
         # Append the token: generated slots are contiguous from padded_len.

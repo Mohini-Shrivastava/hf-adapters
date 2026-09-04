@@ -58,6 +58,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gpt_neo.py",
         "size": "0.1b",
     },
+    # hf_opt.py
+    "opt": {
+        "name": "OPT 125M",
+        "path": "facebook/opt-125m",
+        "adapter": "hf_opt.py",
+        "size": "0.1b",
+    },
     # hf_gpt_neox.py
     "pythia_410m": {
         "name": "Pythia 410M",
@@ -125,6 +132,13 @@ CAUSAL_LM_MODELS = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
         "size": "3b",
+    },
+    # hf_lfm2.py
+    "lfm2_350m": {
+        "name": "LFM2 350M",
+        "path": "LiquidAI/LFM2-350M",
+        "adapter": "hf_lfm2.py",
+        "size": "0.35b",
     },
     # hf_llama.py
     "tiny_llama": {
@@ -225,6 +239,19 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
         "size": "1b",
     },
+    # hf_gemma2.py
+    "gemma2_2b_unsloth": {
+        "name": "Gemma 2 2B",
+        "path": "unsloth/gemma-2-2b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "2b",
+    },
+    "gemma2_9b_unsloth": {
+        "name": "Gemma 2 9B",
+        "path": "unsloth/gemma-2-9b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "9b",
+    },
     # hf_gemma3.py
     "gemma3_unsloth": {
         "name": "Gemma 3 1B",
@@ -260,6 +287,14 @@ CAUSAL_LM_MODELS = {
         "size": "31b",
         "dtype": "bfloat16",
         "is_gated": True,
+    },
+    # hf_gemma4_moe.py
+    "gemma4_moe": {
+        "name": "Gemma 4 26B-A4B (MoE)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_moe.py",
+        "size": "26b",
+        "dtype": "bfloat16",
     },
     # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
     # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
@@ -440,6 +475,19 @@ QUESTION_ANSWERING_MODELS = {
         "path": "deepset/roberta-base-squad2",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1b",
+    },
+    # hf_distilbert.py
+    "distilbert_qa_uncased": {
+        "name": "DistilBERT base uncased distilled SQuAD",
+        "path": "distilbert/distilbert-base-uncased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    "distilbert_qa_cased": {
+        "name": "DistilBERT base cased distilled SQuAD",
+        "path": "distilbert/distilbert-base-cased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
     },
 }
 
@@ -739,15 +787,18 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
     (
-        "gemma4_google",  # gemma4 responds poorly to prompt without template
-        "gemma4_base",
         "smollm3",
+        "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
+        "gemma4_base",
+        "gemma4_google",
+        "gemma4_31b",
+        "gemma4_moe",
     ),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    (),
+    ("gemma4_mm",),
 )
 
 
@@ -784,3 +835,33 @@ RERANKER_MODELS = {
 RERANKER_PATHS: list[str] = _exclude([m["path"] for m in RERANKER_MODELS.values()])
 # No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
 ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
+
+
+# Sequence-classification models — multi-label classifiers that return
+# ``[B, num_labels]`` logits.  Exercised by
+# ``tests/cpu/test_seq_classification_cpu_accuracy.py``.
+SEQ_CLASSIFICATION_MODELS = {
+    # hf_distilbert.py
+    "distilbert_sst2": {
+        "name": "DistilBERT base uncased finetuned SST-2",
+        "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
+    "roberta_mnli": {
+        "name": "RoBERTa large MNLI",
+        "path": "FacebookAI/roberta-large-mnli",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.36b",
+    },
+}
+
+SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)
