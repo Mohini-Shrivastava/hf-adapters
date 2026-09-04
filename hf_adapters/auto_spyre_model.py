@@ -51,6 +51,9 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     BertConfig,
+    CLIPConfig,
+    CLIPTextConfig,
+    CLIPVisionConfig,
     Gemma3Config,
     Gemma3TextConfig,
     Gemma4Config,
@@ -90,6 +93,7 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 import hf_adapters.hf_common as hf_common
 from hf_adapters import (
     hf_bert,
+    hf_clip,
     hf_dspark_gemma4,
     hf_dspark_granite,
     hf_dspark_qwen3,
@@ -130,6 +134,9 @@ from hf_adapters.hf_common import (
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    CLIPConfig: hf_clip,
+    CLIPTextConfig: hf_clip,
+    CLIPVisionConfig: hf_clip,
     Gemma3Config: hf_gemma3,
     Gemma3TextConfig: hf_gemma3,
     Gemma4Config: hf_gemma4,
@@ -233,8 +240,21 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        config = AutoConfig.from_pretrained(model_name_or_path)
-        dtype = getattr(config, "dtype", None) or torch.float16
+        try:
+            config = AutoConfig.from_pretrained(model_name_or_path)
+        except Exception:
+            config = None
+            for sub in ("0_CLIPModel", "0_Transformer"):
+                try:
+                    config = AutoConfig.from_pretrained(
+                        model_name_or_path, subfolder=sub
+                    )
+                    break
+                except Exception:
+                    pass
+        dtype = (
+            getattr(config, "dtype", None) or torch.float16 if config else torch.float16
+        )
 
     if dtype == torch.float32 and device_str == "spyre":
         dtype = torch.float16
@@ -249,9 +269,32 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config: PretrainedConfig = AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=trust_remote_code
-    )
+    try:
+        model_config: PretrainedConfig = AutoConfig.from_pretrained(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
+    except Exception as exc:
+        # Check if the path is a sub-module repository like sentence-transformers
+        # e.g. sentence-transformers/clip-ViT-B-32 has subfolders like '0_CLIPModel'
+        if not isinstance(exc, (ValueError, EnvironmentError, OSError)):
+            raise
+        # Attempt to resolve known subfolders
+        resolved_config = None
+        for sub in ("0_CLIPModel", "0_Transformer"):
+            try:
+                resolved_config = AutoConfig.from_pretrained(
+                    model_name_or_path,
+                    subfolder=sub,
+                    trust_remote_code=trust_remote_code,
+                )
+                break
+            except Exception:
+                pass
+        if resolved_config is None:
+            raise SpyreNoAdapterError(
+                f"Could not load config for {model_name_or_path}: {exc}"
+            ) from exc
+        model_config = resolved_config
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on
