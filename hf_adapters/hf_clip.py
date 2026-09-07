@@ -41,7 +41,6 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     encoder_backbone_forward,
-    make_vision_encoder_block,
 )
 
 
@@ -71,30 +70,54 @@ def _pad_clip_mlp(layers, orig_inter, padded_inter):
         mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
 
 
-def _make_compiled_clip_encoder_block(layer, orig_head_dim, padded_head_dim, num_heads):
-    """Build a compiled pre-LN block for CLIP transformer layer."""
+def _make_compiled_clip_encoder_block(
+    layer, orig_head_dim, padded_head_dim, num_heads, dynamic: bool = False
+):
+    """Build a compiled pre-LN block for CLIP transformer layer.
+
+    Args:
+        dynamic: Pass ``True`` for the text encoder, whose sequence length varies
+            with prompt length. The vision encoder always uses a fixed patch count
+            so ``dynamic=False`` (the default) is correct there.
+    """
     attn = layer.self_attn
     scale = 1.0 / math.sqrt(orig_head_dim)
     act_fn = getattr(layer.mlp, "activation_fn", getattr(layer.mlp, "act_fn", F.gelu))
+    num_h = num_heads
+    hd = padded_head_dim
 
-    return make_vision_encoder_block(
-        q_proj=attn.q_proj,
-        k_proj=attn.k_proj,
-        v_proj=attn.v_proj,
-        o_proj=attn.out_proj,
-        layer_norm1=layer.layer_norm1,
-        layer_norm2=layer.layer_norm2,
-        ffn_in=layer.mlp.fc1,
-        act=act_fn,
-        ffn_out=layer.mlp.fc2,
-        num_heads=num_heads,
-        head_dim=padded_head_dim,
-        scale=scale,
-    )
+    def block_forward(hidden_states):
+        bsz, seq_len, _ = hidden_states.shape
+        residual = hidden_states
+        h = layer.layer_norm1(hidden_states)
+        q = attn.q_proj(h).view(bsz, seq_len, num_h, hd).transpose(1, 2)
+        k = attn.k_proj(h).view(bsz, seq_len, num_h, hd).transpose(1, 2)
+        v = attn.v_proj(h).view(bsz, seq_len, num_h, hd).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = attn.out_proj(attn_out)
+        hidden_states = residual + attn_out
+
+        residual = hidden_states
+        h = layer.layer_norm2(hidden_states)
+        h = layer.mlp.fc2(act_fn(layer.mlp.fc1(h)))
+        hidden_states = residual + h
+        return hidden_states
+
+    return torch.compile(block_forward, dynamic=dynamic)
 
 
-def _prepare_clip_encoder(encoder_module, config):
-    """Prepare a CLIPEncoder sub-module (text or vision) for Spyre execution."""
+def _prepare_clip_encoder(encoder_module, config, dynamic: bool = False):
+    """Prepare a CLIPEncoder sub-module (text or vision) for Spyre execution.
+
+    Args:
+        dynamic: When ``True``, compile encoder blocks with ``dynamic=True`` so
+            that variable-length inputs (e.g. the text tower) are accepted without
+            recompilation. The vision tower has a fixed patch count so the default
+            ``False`` is correct there.
+    """
     orig_head_dim = getattr(config, "head_dim", None) or (
         config.hidden_size // config.num_attention_heads
     )
@@ -123,6 +146,7 @@ def _prepare_clip_encoder(encoder_module, config):
             orig_head_dim,
             stick_aligned_head_dim,
             config.num_attention_heads,
+            dynamic=dynamic,
         )
         for layer in layers
     ]
@@ -224,7 +248,7 @@ def prepare_for_spyre(model):
     if hasattr(model, "text_model") or hasattr(model, "vision_model"):
         if hasattr(model, "text_model"):
             text_cfg = getattr(model.config, "text_config", model.config)
-            _prepare_clip_encoder(model.text_model.encoder, text_cfg)
+            _prepare_clip_encoder(model.text_model.encoder, text_cfg, dynamic=True)
             model.text_model.encoder._spyre_final_layer_norm = getattr(
                 model.text_model, "final_layer_norm", None
             )
@@ -253,7 +277,11 @@ def prepare_for_spyre(model):
     # 2. Bare CLIPTextModel or CLIPVisionModel
     if hasattr(model, "encoder"):
         cfg = model.config
-        _prepare_clip_encoder(model.encoder, cfg)
+        # Bare text model → dynamic=True; bare vision model → dynamic=False (fixed patch count).
+        is_text_model = hasattr(model, "final_layer_norm") and not hasattr(
+            model, "post_layernorm"
+        )
+        _prepare_clip_encoder(model.encoder, cfg, dynamic=is_text_model)
         final_norm = getattr(
             model, "final_layer_norm", getattr(model, "post_layernorm", None)
         )
