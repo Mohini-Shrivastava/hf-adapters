@@ -70,15 +70,15 @@ def _pad_clip_mlp(layers, orig_inter, padded_inter):
         mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
 
 
-def _make_compiled_clip_encoder_block(
-    layer, orig_head_dim, padded_head_dim, num_heads, dynamic: bool = False
-):
+def _make_compiled_clip_encoder_block(layer, orig_head_dim, padded_head_dim, num_heads):
     """Build a compiled pre-LN block for CLIP transformer layer.
 
-    Args:
-        dynamic: Pass ``True`` for the text encoder, whose sequence length varies
-            with prompt length. The vision encoder always uses a fixed patch count
-            so ``dynamic=False`` (the default) is correct there.
+    Compiled with ``dynamic=False``. Callers must ensure the sequence dimension
+    is already padded to a BLOCK_SIZE multiple before calling the block, so the
+    compiler always sees a fixed shape and Spyre's symbolic-shape issues are avoided.
+
+    Accepts an optional additive ``attn_mask`` argument (shape ``[B,1,S,S]``) so
+    the text tower's causal mask is honoured. The vision tower passes ``None``.
     """
     attn = layer.self_attn
     scale = 1.0 / math.sqrt(orig_head_dim)
@@ -86,17 +86,36 @@ def _make_compiled_clip_encoder_block(
     num_h = num_heads
     hd = padded_head_dim
 
-    def block_forward(hidden_states):
+    def block_forward(hidden_states, attn_mask=None):
         bsz, seq_len, _ = hidden_states.shape
         residual = hidden_states
         h = layer.layer_norm1(hidden_states)
-        q = attn.q_proj(h).view(bsz, seq_len, num_h, hd).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, num_h, hd).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, num_h, hd).transpose(1, 2)
-        attn_out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
+        # permute(0,2,1,3) + contiguous() produces a row-major [B,heads,seq,hd]
+        # tensor. This is required on Spyre: a non-contiguous view after transpose
+        # causes ``lower_pad_sequence`` to see multiple non-BLOCK_SIZE-aligned dims
+        # simultaneously and reject the pad.
+        q = (
+            attn.q_proj(h)
+            .reshape(bsz, seq_len, num_h, hd)
+            .permute(0, 2, 1, 3)
+            .contiguous()
         )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        k = (
+            attn.k_proj(h)
+            .reshape(bsz, seq_len, num_h, hd)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        v = (
+            attn.v_proj(h)
+            .reshape(bsz, seq_len, num_h, hd)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False, scale=scale
+        )
+        attn_out = attn_out.permute(0, 2, 1, 3).contiguous().reshape(bsz, seq_len, -1)
         attn_out = attn.out_proj(attn_out)
         hidden_states = residual + attn_out
 
@@ -106,18 +125,11 @@ def _make_compiled_clip_encoder_block(
         hidden_states = residual + h
         return hidden_states
 
-    return torch.compile(block_forward, dynamic=dynamic)
+    return torch.compile(block_forward, dynamic=False)
 
 
-def _prepare_clip_encoder(encoder_module, config, dynamic: bool = False):
-    """Prepare a CLIPEncoder sub-module (text or vision) for Spyre execution.
-
-    Args:
-        dynamic: When ``True``, compile encoder blocks with ``dynamic=True`` so
-            that variable-length inputs (e.g. the text tower) are accepted without
-            recompilation. The vision tower has a fixed patch count so the default
-            ``False`` is correct there.
-    """
+def _prepare_clip_encoder(encoder_module, config):
+    """Prepare a CLIPEncoder sub-module (text or vision) for Spyre execution."""
     orig_head_dim = getattr(config, "head_dim", None) or (
         config.hidden_size // config.num_attention_heads
     )
@@ -146,7 +158,6 @@ def _prepare_clip_encoder(encoder_module, config, dynamic: bool = False):
             orig_head_dim,
             stick_aligned_head_dim,
             config.num_attention_heads,
-            dynamic=dynamic,
         )
         for layer in layers
     ]
@@ -155,14 +166,47 @@ def _prepare_clip_encoder(encoder_module, config, dynamic: bool = False):
     # Replace CLIPEncoder.forward (instance-level) with a compiled-block loop.
     # HF's default CLIPEncoder.forward iterates self.layers (original, uncompiled).
     # We bypass it entirely and run our compiled blocks directly.
+    #
+    # Sequence padding: compiled blocks use dynamic=False, so they must always
+    # see a BLOCK_SIZE-aligned seq_len. The vision tower's patch count (50) is
+    # already not a multiple of 64, so we pad on entry and crop on exit for both
+    # towers. This mirrors what prefill_encoder does for BERT-style models.
     _compiled_blocks = compiled_blocks
 
     def _spyre_encoder_forward(self, inputs_embeds, **kwargs):
+        # Collect the causal + padding attention mask supplied by
+        # CLIPTextTransformer (combined into a single additive float mask by HF).
+        # CLIPVisionTransformer passes neither, so both are None.
+        attn_mask = kwargs.get("attention_mask", None)
+        causal_mask = kwargs.get("causal_attention_mask", None)
+        if causal_mask is not None and attn_mask is not None:
+            combined_mask = attn_mask + causal_mask
+        elif causal_mask is not None:
+            combined_mask = causal_mask
+        elif attn_mask is not None:
+            combined_mask = attn_mask
+        else:
+            combined_mask = None
+
         h = inputs_embeds.to(DEVICE)
+        orig_seq = h.shape[1]
+        pad_len = (math.ceil(orig_seq / BLOCK_SIZE) * BLOCK_SIZE) - orig_seq
+        if pad_len > 0:
+            h = F.pad(h, (0, 0, 0, pad_len))  # pad seq dim on the right
+            if combined_mask is not None:
+                # Pad mask from [B,1,S,S] to [B,1,S_pad,S_pad] with -inf so
+                # padded positions are masked out in both Q and K directions.
+                combined_mask = F.pad(
+                    combined_mask, (0, pad_len, 0, pad_len), value=float("-inf")
+                )
+        if combined_mask is not None:
+            combined_mask = combined_mask.to(DEVICE)
         h = h.clone()  # canonical layout before first block
         for block in _compiled_blocks:
-            h = block(h)
+            h = block(h, combined_mask)
             h = h.clone()  # canonical layout between blocks
+        if pad_len > 0:
+            h = h[:, :orig_seq, :]
         # Move back to CPU before returning. The downstream ops in
         # CLIPVisionTransformer (class-token slice, post_layernorm) and
         # CLIPTextTransformer (final_layer_norm, eos-token slice) are 2D
@@ -248,7 +292,7 @@ def prepare_for_spyre(model):
     if hasattr(model, "text_model") or hasattr(model, "vision_model"):
         if hasattr(model, "text_model"):
             text_cfg = getattr(model.config, "text_config", model.config)
-            _prepare_clip_encoder(model.text_model.encoder, text_cfg, dynamic=True)
+            _prepare_clip_encoder(model.text_model.encoder, text_cfg)
             model.text_model.encoder._spyre_final_layer_norm = getattr(
                 model.text_model, "final_layer_norm", None
             )
@@ -277,11 +321,7 @@ def prepare_for_spyre(model):
     # 2. Bare CLIPTextModel or CLIPVisionModel
     if hasattr(model, "encoder"):
         cfg = model.config
-        # Bare text model → dynamic=True; bare vision model → dynamic=False (fixed patch count).
-        is_text_model = hasattr(model, "final_layer_norm") and not hasattr(
-            model, "post_layernorm"
-        )
-        _prepare_clip_encoder(model.encoder, cfg, dynamic=is_text_model)
+        _prepare_clip_encoder(model.encoder, cfg)
         final_norm = getattr(
             model, "final_layer_norm", getattr(model, "post_layernorm", None)
         )

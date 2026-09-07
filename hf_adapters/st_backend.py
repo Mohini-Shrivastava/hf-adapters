@@ -53,7 +53,6 @@ import torch
 from transformers.modeling_outputs import BaseModelOutput
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, resolve_adapter_module
-from hf_adapters.hf_clip import prepare_for_spyre as prepare_clip_for_spyre
 from hf_adapters.hf_common import prefill_embed, prefill_encoder
 
 
@@ -216,10 +215,14 @@ def _spyre_forward(self, input, **kwargs):
         for module in list(self.children())[1:]:
             module.to("cpu")
         # Re-pin CPU sub-modules inside the backbone (e.g. CLIP embeddings).
-        # self[0] is the ST Transformer wrapper; self[0].auto_model is the HF model.
+        # self[0] is the ST module wrapping the HF model. Depending on the ST
+        # module type the HF model is stored as ``auto_model`` (ST Transformer)
+        # or ``model`` (ST CLIPModel). Check both.
         backbone_wrapper = next(iter(self.children()), None)
         if backbone_wrapper is not None:
-            hf_model = getattr(backbone_wrapper, "auto_model", None)
+            hf_model = getattr(backbone_wrapper, "auto_model", None) or getattr(
+                backbone_wrapper, "model", None
+            )
             if hf_model is not None:
                 for submod_name in getattr(hf_model, "_spyre_cpu_submodules", []):
                     try:
@@ -244,12 +247,11 @@ def _patch_clip_model_if_available():
     def _spyre_clip_init(self, *args, **kwargs):
         _orig_clip_init(self, *args, **kwargs)
         if hasattr(self, "model"):
-            try:
-                prepare_clip_for_spyre(self.model)
-                for submod_name in getattr(self.model, "_spyre_cpu_submodules", []):
-                    self.model.get_submodule(submod_name).to("cpu")
-            except Exception:
-                pass
+            from hf_adapters.hf_clip import prepare_for_spyre as prepare_clip_for_spyre
+
+            prepare_clip_for_spyre(self.model)
+            for submod_name in getattr(self.model, "_spyre_cpu_submodules", []):
+                self.model.get_submodule(submod_name).to("cpu")
 
     CLIPModel.__init__ = _spyre_clip_init
     CLIPModel._spyre_patched = True
