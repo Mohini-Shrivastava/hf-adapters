@@ -41,13 +41,14 @@ import pytest
 import torch.nn.functional as F
 
 from tests.cpu.conftest import _unwrap_compiled_blocks, cosine_per_row
+from tests.model_registry import CLIP_PATHS
 
 pytestmark = pytest.mark.model_harness("embedding")
 
 pytest.importorskip("sentence_transformers")
 pytest.importorskip("PIL")
 
-MODEL_PATH = "sentence-transformers/clip-ViT-B-32"
+MODEL_PATH = CLIP_PATHS[0] if CLIP_PATHS else "sentence-transformers/clip-ViT-B-32"
 
 TEXT_PROMPTS = [
     "Two dogs in the snow",

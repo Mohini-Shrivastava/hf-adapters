@@ -38,10 +38,11 @@ import torch.nn.functional as F
 
 # Registers the "spyre" backend with sentence_transformers on import.
 import hf_adapters.st_backend  # noqa: F401
+from tests.model_registry import CLIP_PATHS
 
 pytestmark = pytest.mark.model_harness("embedding")
 
-MODEL_PATH = "sentence-transformers/clip-ViT-B-32"
+MODEL_PATH = CLIP_PATHS[0] if CLIP_PATHS else "sentence-transformers/clip-ViT-B-32"
 
 TEXT_PROMPTS = [
     "Two dogs in the snow",
