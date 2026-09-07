@@ -171,7 +171,6 @@ def _prepare_clip_encoder(encoder_module, config):
     # see a BLOCK_SIZE-aligned seq_len. The vision tower's patch count (50) is
     # already not a multiple of 64, so we pad on entry and crop on exit for both
     # towers. This mirrors what prefill_encoder does for BERT-style models.
-    _compiled_blocks = compiled_blocks
 
     def _spyre_encoder_forward(self, inputs_embeds, **kwargs):
         # Collect the causal + padding attention mask supplied by
@@ -193,16 +192,18 @@ def _prepare_clip_encoder(encoder_module, config):
         pad_len = (math.ceil(orig_seq / BLOCK_SIZE) * BLOCK_SIZE) - orig_seq
         if pad_len > 0:
             h = F.pad(h, (0, 0, 0, pad_len))  # pad seq dim on the right
-            if combined_mask is not None:
-                # Pad mask from [B,1,S,S] to [B,1,S_pad,S_pad] with -inf so
-                # padded positions are masked out in both Q and K directions.
-                combined_mask = F.pad(
-                    combined_mask, (0, pad_len, 0, pad_len), value=float("-inf")
-                )
+            if combined_mask is None:
+                combined_mask = torch.ones((1, 1, orig_seq, orig_seq), dtype=torch.bool)
+            # Pad mask from [B,1,S,S] to [B,1,S_pad,S_pad], disallowing
+            # compiler-added positions in both the query and key dimensions.
+            mask_value = False if combined_mask.dtype == torch.bool else float("-inf")
+            combined_mask = F.pad(
+                combined_mask, (0, pad_len, 0, pad_len), value=mask_value
+            )
         if combined_mask is not None:
             combined_mask = combined_mask.to(DEVICE)
         h = h.clone()  # canonical layout before first block
-        for block in _compiled_blocks:
+        for block in self._spyre_compiled_blocks:
             h = block(h, combined_mask)
             h = h.clone()  # canonical layout between blocks
         if pad_len > 0:
