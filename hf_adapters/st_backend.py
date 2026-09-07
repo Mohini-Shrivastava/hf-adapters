@@ -232,31 +232,6 @@ def _spyre_forward(self, input, **kwargs):
     return _original_forward(self, input, **kwargs)
 
 
-def _patch_clip_model_if_available():
-    """Patch sentence_transformers.models.CLIPModel to support backend="spyre"."""
-    try:
-        from sentence_transformers.models import CLIPModel
-    except ImportError:
-        return
-
-    if getattr(CLIPModel, "_spyre_patched", False):
-        return
-
-    _orig_clip_init = CLIPModel.__init__
-
-    def _spyre_clip_init(self, *args, **kwargs):
-        _orig_clip_init(self, *args, **kwargs)
-        if hasattr(self, "model"):
-            from hf_adapters.hf_clip import prepare_for_spyre as prepare_clip_for_spyre
-
-            prepare_clip_for_spyre(self.model)
-            for submod_name in getattr(self.model, "_spyre_cpu_submodules", []):
-                self.model.get_submodule(submod_name).to("cpu")
-
-    CLIPModel.__init__ = _spyre_clip_init
-    CLIPModel._spyre_patched = True
-
-
 def register():
     """Monkey-patch ST to add ``backend="spyre"`` support.
 
@@ -282,7 +257,6 @@ def register():
     SentenceTransformer.forward = _spyre_forward
 
     Transformer._spyre_patched = True
-    _patch_clip_model_if_available()
 
 
 # Register immediately on import.
