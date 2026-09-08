@@ -49,6 +49,10 @@ def generate_matrices(exclude_models=None, only_models=None):
     registry = tests.model_registry
     categories = {
         "causal": (registry.CAUSAL_PATHS, registry.ALL_CAUSAL_PATHS),
+        "multicard_smoke": (
+            registry.MULTICARD_SMOKE_PATHS,
+            registry.MULTICARD_SMOKE_PATHS,
+        ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
         "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
@@ -88,6 +92,7 @@ def generate_matrices(exclude_models=None, only_models=None):
 
     return {
         "causal": paths["causal"],
+        "multicard_smoke": paths["multicard_smoke"],
         "embed": paths["embed"],
         "vision": paths["vision"],
         "clip": paths["clip"],
@@ -112,6 +117,7 @@ def format_for_github_actions(matrices):
     """
     return {
         "causal_matrix": json.dumps(matrices["causal"]),
+        "multicard_smoke_matrix": json.dumps(matrices["multicard_smoke"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "clip_matrix": json.dumps(matrices["clip"]),
@@ -174,6 +180,10 @@ def main():
     print("Generated test matrices:")
     print(
         f"  Causal models ({len(matrices['causal'])}): {', '.join(matrices['causal'])}"
+    )
+    print(
+        f"  Multicard-smoke models ({len(matrices['multicard_smoke'])}): "
+        f"{', '.join(matrices['multicard_smoke'])}"
     )
     print(
         f"  Embedding models ({len(matrices['embed'])}): {', '.join(matrices['embed'])}"
