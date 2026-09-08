@@ -43,7 +43,7 @@ import os
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import torch
 from transformers import (
@@ -57,8 +57,6 @@ from transformers import (
     AutoModelForTokenClassification,
     BertConfig,
     CLIPConfig,
-    CLIPTextConfig,
-    CLIPVisionConfig,
     DistilBertConfig,
     Gemma2Config,
     Gemma3Config,
@@ -73,7 +71,6 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
-    GraniteSWAConfig,  # type: ignore[attr-defined]
     Lfm2Config,
     LlamaConfig,
     MistralConfig,
@@ -90,6 +87,11 @@ from transformers import (
     SmolLM3Config,
     XLMRobertaConfig,
 )
+
+try:
+    from transformers import GraniteSWAConfig  # type: ignore[attr-defined]
+except ImportError:
+    GraniteSWAConfig = None
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import (
     MaskedLMOutput,
@@ -150,8 +152,6 @@ from hf_adapters.hf_common import (
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
     CLIPConfig: hf_clip,
-    CLIPTextConfig: hf_clip,
-    CLIPVisionConfig: hf_clip,
     DistilBertConfig: hf_distilbert,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
@@ -166,7 +166,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
-    GraniteSWAConfig: hf_granite_swa,
+    **({GraniteSWAConfig: hf_granite_swa} if GraniteSWAConfig is not None else {}),
     Lfm2Config: hf_lfm2,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
@@ -244,6 +244,44 @@ MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
 }
 
 
+# Known sub-module subfolders used by sentence-transformers composite repos,
+# e.g. sentence-transformers/clip-ViT-B-32 stores its model under '0_CLIPModel'.
+_ST_SUBFOLDERS = ("0_CLIPModel", "0_Transformer")
+
+
+def _autoconfig_with_subfolder_fallback(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    trust_remote_code: bool | None = None,
+) -> PretrainedConfig | None:
+    """Load ``AutoConfig`` for *model_name_or_path*, probing known ST subfolders on failure.
+
+    Returns the first config that loads successfully, or ``None`` if every
+    attempt fails.
+    """
+    try:
+        return cast(
+            PretrainedConfig,
+            AutoConfig.from_pretrained(
+                model_name_or_path, trust_remote_code=trust_remote_code
+            ),
+        )
+    except Exception:
+        pass
+    for sub in _ST_SUBFOLDERS:
+        try:
+            return cast(
+                PretrainedConfig,
+                AutoConfig.from_pretrained(
+                    model_name_or_path,
+                    subfolder=sub,
+                    trust_remote_code=trust_remote_code,
+                ),
+            )
+        except Exception:
+            pass
+    return None
+
+
 def dtype_for_model_path(
     model_name_or_path: Union[str, os.PathLike[str]],
     target_device: str | torch.device,
@@ -260,18 +298,7 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        try:
-            config = AutoConfig.from_pretrained(model_name_or_path)
-        except Exception:
-            config = None
-            for sub in ("0_CLIPModel", "0_Transformer"):
-                try:
-                    config = AutoConfig.from_pretrained(
-                        model_name_or_path, subfolder=sub
-                    )
-                    break
-                except Exception:
-                    pass
+        config = _autoconfig_with_subfolder_fallback(model_name_or_path)
         dtype = (
             getattr(config, "dtype", None) or torch.float16 if config else torch.float16
         )
@@ -289,8 +316,9 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
+    model_config: PretrainedConfig | None = None
     try:
-        model_config: PretrainedConfig = AutoConfig.from_pretrained(
+        model_config = AutoConfig.from_pretrained(
             model_name_or_path, trust_remote_code=trust_remote_code
         )
     except Exception as exc:
@@ -298,23 +326,14 @@ def resolve_adapter_module(
         # e.g. sentence-transformers/clip-ViT-B-32 has subfolders like '0_CLIPModel'
         if not isinstance(exc, (ValueError, EnvironmentError, OSError)):
             raise
-        # Attempt to resolve known subfolders
-        resolved_config = None
-        for sub in ("0_CLIPModel", "0_Transformer"):
-            try:
-                resolved_config = AutoConfig.from_pretrained(
-                    model_name_or_path,
-                    subfolder=sub,
-                    trust_remote_code=trust_remote_code,
-                )
-                break
-            except Exception:
-                pass
-        if resolved_config is None:
+        model_config = _autoconfig_with_subfolder_fallback(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
+        if model_config is None:
             raise SpyreNoAdapterError(
                 f"Could not load config for {model_name_or_path}: {exc}"
             ) from exc
-        model_config = resolved_config
+    assert model_config is not None
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on

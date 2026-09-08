@@ -15,7 +15,7 @@
 """
 CPU accuracy test for the CLIP adapter (``hf_clip.py``) via the ST backend.
 
-Covers both towers of ``sentence-transformers/clip-ViT-B-32``:
+Covers both towers of each registered CLIP checkpoint:
 
 - **Text tower**: encode a list of strings and assert per-sentence cosine
   similarity between the stock CPU model and the ``backend="spyre"`` model
@@ -48,8 +48,6 @@ pytestmark = pytest.mark.model_harness("embedding")
 pytest.importorskip("sentence_transformers")
 pytest.importorskip("PIL")
 
-MODEL_PATH = CLIP_PATHS[0] if CLIP_PATHS else "sentence-transformers/clip-ViT-B-32"
-
 TEXT_PROMPTS = [
     "Two dogs in the snow",
     "A cat on a table",
@@ -80,17 +78,17 @@ def _load_image(url: str):
     return Image.open(BytesIO(response.content)).convert("RGB")
 
 
-def _load_models():
-    """Return (ref_model, spyre_model) both running on CPU."""
+def _load_models(model_path: str):
+    """Return (ref_model, spyre_model) for *model_path*, both running on CPU."""
     from sentence_transformers import SentenceTransformer
 
     import hf_adapters.st_backend  # noqa: F401  (registers "spyre" backend with ST)
 
-    ref_model = SentenceTransformer(MODEL_PATH, device="cpu")
+    ref_model = SentenceTransformer(model_path, device="cpu")
 
     # backend="spyre" with DEVICE patched to "cpu" by conftest; unwrap compiled
     # blocks so the forward runs as plain Python on CPU.
-    spyre_model = SentenceTransformer(MODEL_PATH, backend="spyre", device="cpu")
+    spyre_model = SentenceTransformer(model_path, backend="spyre", device="cpu")
     _unwrap_compiled_blocks(spyre_model._first_module().model)
 
     return ref_model, spyre_model
@@ -101,9 +99,10 @@ def _load_models():
 # ---------------------------------------------------------------------------
 
 
-def test_clip_text_cpu() -> None:
+@pytest.mark.parametrize("model_path", CLIP_PATHS, ids=CLIP_PATHS)
+def test_clip_text_cpu(model_path: str) -> None:
     """Text tower: ``backend='spyre'`` sentence embeddings match stock CPU."""
-    ref_model, spyre_model = _load_models()
+    ref_model, spyre_model = _load_models(model_path)
 
     ref_embs = ref_model.encode(TEXT_PROMPTS, convert_to_tensor=True)
     del ref_model
@@ -125,9 +124,10 @@ def test_clip_text_cpu() -> None:
     )
 
 
-def test_clip_image_cpu() -> None:
+@pytest.mark.parametrize("model_path", CLIP_PATHS, ids=CLIP_PATHS)
+def test_clip_image_cpu(model_path: str) -> None:
     """Vision tower: ``backend='spyre'`` image embeddings match stock CPU."""
-    ref_model, spyre_model = _load_models()
+    ref_model, spyre_model = _load_models(model_path)
 
     images = [_load_image(url) for url in IMAGE_URLS]
 
@@ -151,14 +151,15 @@ def test_clip_image_cpu() -> None:
     )
 
 
-def test_clip_crossmodal_ranking_cpu() -> None:
+@pytest.mark.parametrize("model_path", CLIP_PATHS, ids=CLIP_PATHS)
+def test_clip_crossmodal_ranking_cpu(model_path: str) -> None:
     """Cross-modal: image–text cosine rankings match between stock CPU and ``backend='spyre'``.
 
     Encodes one dog image and three text descriptions. Asserts that the ranking
     of texts by cosine similarity to the image is identical between the reference
     and the spyre-backend model, and that the dog-related caption ranks first.
     """
-    ref_model, spyre_model = _load_models()
+    ref_model, spyre_model = _load_models(model_path)
 
     image = _load_image(IMAGE_URLS[0])
 

@@ -713,6 +713,18 @@ def pad_attention_heads_linear(
     model._spyre_head_dim = padded_head_dim
 
 
+def pad_encoder_mlp(layers, orig_inter, padded_inter):
+    """Zero-pad each encoder layer's MLP intermediate dim to a stick boundary.
+
+    Pads ``layer.mlp.fc1`` output and ``layer.mlp.fc2`` input so the
+    contraction (K) dim of the fc2 matmul is stick-aligned on Spyre.
+    """
+    for layer in layers:
+        mlp = layer.mlp
+        mlp.fc1 = _pad_proj_output_simple(mlp.fc1, 1, orig_inter, padded_inter)
+        mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
+
+
 def pad_attention_heads_simple(
     model, layers, orig_head_dim, padded_head_dim, num_heads
 ):

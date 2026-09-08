@@ -38,36 +38,10 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
-    _pad_proj_input_simple,
-    _pad_proj_output_simple,
     encoder_backbone_forward,
+    pad_attention_heads_linear,
+    pad_encoder_mlp,
 )
-
-
-def _pad_clip_heads(layers, num_heads, orig_head_dim, padded_head_dim):
-    """Zero-pad CLIP per-layer Q/K/V/O projections to a stick boundary."""
-    for layer in layers:
-        attn = layer.self_attn
-        attn.q_proj = _pad_proj_output_simple(
-            attn.q_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-        attn.k_proj = _pad_proj_output_simple(
-            attn.k_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-        attn.v_proj = _pad_proj_output_simple(
-            attn.v_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-        attn.out_proj = _pad_proj_input_simple(
-            attn.out_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-
-
-def _pad_clip_mlp(layers, orig_inter, padded_inter):
-    """Zero-pad each CLIP MLP intermediate dim to a stick boundary if needed."""
-    for layer in layers:
-        mlp = layer.mlp
-        mlp.fc1 = _pad_proj_output_simple(mlp.fc1, 1, orig_inter, padded_inter)
-        mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
 
 
 def _make_compiled_clip_encoder_block(layer, orig_head_dim, padded_head_dim, num_heads):
@@ -140,17 +114,18 @@ def _prepare_clip_encoder(encoder_module, config):
     layers = list(encoder_module.layers)
 
     if stick_aligned_head_dim > orig_head_dim:
-        _pad_clip_heads(
-            layers,
-            config.num_attention_heads,
+        pad_attention_heads_linear(
+            encoder_module,
+            [layer.self_attn for layer in layers],
             orig_head_dim,
             stick_aligned_head_dim,
+            config.num_attention_heads,
         )
 
     orig_inter = config.intermediate_size
     stick_aligned_inter = ((orig_inter + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
     if stick_aligned_inter > orig_inter:
-        _pad_clip_mlp(layers, orig_inter, stick_aligned_inter)
+        pad_encoder_mlp(layers, orig_inter, stick_aligned_inter)
 
     compiled_blocks = [
         _make_compiled_clip_encoder_block(
@@ -172,20 +147,24 @@ def _prepare_clip_encoder(encoder_module, config):
     # already not a multiple of 64, so we pad on entry and crop on exit for both
     # towers. This mirrors what prefill_encoder does for BERT-style models.
 
-    def _spyre_encoder_forward(self, inputs_embeds, **kwargs):
-        # Collect the causal + padding attention mask supplied by
-        # CLIPTextTransformer (combined into a single additive float mask by HF).
-        # CLIPVisionTransformer passes neither, so both are None.
-        attn_mask = kwargs.get("attention_mask", None)
-        causal_mask = kwargs.get("causal_attention_mask", None)
-        if causal_mask is not None and attn_mask is not None:
-            combined_mask = attn_mask + causal_mask
-        elif causal_mask is not None:
-            combined_mask = causal_mask
-        elif attn_mask is not None:
-            combined_mask = attn_mask
-        else:
-            combined_mask = None
+    def _spyre_encoder_forward(self, inputs_embeds, attention_mask=None, **kwargs):
+        # In the new transformers API (v4.52+), CLIPTextModel.forward calls
+        # create_causal_mask() and passes the result as `attention_mask`.
+        # When _attn_implementation == "sdpa", create_causal_mask returns None
+        # (relying on is_causal=True in SDPA).  Spyre cannot use is_causal=True,
+        # so we materialise the causal mask ourselves when is_causal is set and
+        # no explicit mask was provided.  The vision tower never sets is_causal.
+        is_causal = kwargs.get("is_causal", False)
+        combined_mask = attention_mask
+        if combined_mask is None and is_causal:
+            bsz, seq_len, _ = inputs_embeds.shape
+            # Upper-triangular mask: positions j > i get -inf so the EOS token
+            # attends causally to all preceding tokens (standard CLIP text mask).
+            causal = torch.full(
+                (seq_len, seq_len), float("-inf"), dtype=inputs_embeds.dtype
+            )
+            causal = torch.triu(causal, diagonal=1)
+            combined_mask = causal.unsqueeze(0).unsqueeze(0).expand(bsz, 1, -1, -1)
 
         h = inputs_embeds.to(DEVICE)
         orig_seq = h.shape[1]
@@ -209,8 +188,8 @@ def _prepare_clip_encoder(encoder_module, config):
         if pad_len > 0:
             h = h[:, :orig_seq, :]
         # Move back to CPU before returning. The downstream ops in
-        # CLIPVisionTransformer (class-token slice, post_layernorm) and
-        # CLIPTextTransformer (final_layer_norm, eos-token slice) are 2D
+        # CLIPVisionModel (class-token slice, post_layernorm) and
+        # CLIPTextModel (final_layer_norm, eos-token slice) are 2D
         # pointwise ops that the Spyre DDL cannot lower (requires ≥3 dims).
         h = h.to("cpu")
         from transformers.modeling_outputs import BaseModelOutput
@@ -237,8 +216,8 @@ _run_backbone_forward = encoder_backbone_forward
 _is_encoder_only = True
 
 
-def _patch_vision_transformer_forward(vision_model):
-    """Patch CLIPVisionTransformer.forward (instance) to force pixel_values to CPU.
+def _patch_vision_model_forward(vision_model):
+    """Patch CLIPVisionModel.forward (instance) to force pixel_values to CPU.
 
     ST places all features on model.device (Spyre) before calling forward, but
     the vision embeddings (Conv2d + position embed) are pinned to CPU. Force
@@ -255,30 +234,31 @@ def _patch_vision_transformer_forward(vision_model):
     vision_model.forward = types.MethodType(_spyre_vision_forward, vision_model)
 
 
-def _patch_text_transformer_forward(text_model):
-    """Patch CLIPTextTransformer.forward (instance) to force input_ids to CPU.
+def _patch_text_model_forward(text_model):
+    """Patch CLIPTextModel.forward (instance) to force input_ids/attention_mask to CPU.
 
     ST places all features on model.device (Spyre) before calling forward, but
     the text embeddings (token_embedding + position_embedding) are pinned to CPU.
-    Force input_ids and position_ids to CPU here so the whole text tower runs on
-    CPU up to the encoder, which moves inputs to Spyre internally.
+    Force input_ids, position_ids and the 2-D padding attention_mask to CPU here
+    so the whole text tower runs on CPU up to the encoder, which moves inputs to
+    Spyre internally.
     """
     _orig_forward = text_model.__class__.forward
 
     def _spyre_text_forward(
-        self, input_ids=None, position_ids=None, attention_mask=None, **kwargs
+        self, input_ids=None, attention_mask=None, position_ids=None, **kwargs
     ):
         if input_ids is not None and isinstance(input_ids, torch.Tensor):
             input_ids = input_ids.to("cpu")
-        if position_ids is not None and isinstance(position_ids, torch.Tensor):
-            position_ids = position_ids.to("cpu")
         if attention_mask is not None and isinstance(attention_mask, torch.Tensor):
             attention_mask = attention_mask.to("cpu")
+        if position_ids is not None and isinstance(position_ids, torch.Tensor):
+            position_ids = position_ids.to("cpu")
         return _orig_forward(
             self,
             input_ids=input_ids,
-            position_ids=position_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             **kwargs,
         )
 
@@ -294,23 +274,17 @@ def prepare_for_spyre(model):
         if hasattr(model, "text_model"):
             text_cfg = getattr(model.config, "text_config", model.config)
             _prepare_clip_encoder(model.text_model.encoder, text_cfg)
-            model.text_model.encoder._spyre_final_layer_norm = getattr(
-                model.text_model, "final_layer_norm", None
-            )
             cpu_submods.append("text_model.embeddings")
             if hasattr(model.text_model, "final_layer_norm"):
                 cpu_submods.append("text_model.final_layer_norm")
-            _patch_text_transformer_forward(model.text_model)
+            _patch_text_model_forward(model.text_model)
         if hasattr(model, "vision_model"):
             vision_cfg = getattr(model.config, "vision_config", model.config)
             _prepare_clip_encoder(model.vision_model.encoder, vision_cfg)
-            model.vision_model.encoder._spyre_final_layer_norm = getattr(
-                model.vision_model, "post_layernorm", None
-            )
             cpu_submods.append("vision_model.embeddings")
             cpu_submods.append("vision_model.pre_layrnorm")
             cpu_submods.append("vision_model.post_layernorm")
-            _patch_vision_transformer_forward(model.vision_model)
+            _patch_vision_model_forward(model.vision_model)
         if hasattr(model, "visual_projection"):
             cpu_submods.append("visual_projection")
         if hasattr(model, "text_projection"):
@@ -323,16 +297,12 @@ def prepare_for_spyre(model):
     if hasattr(model, "encoder"):
         cfg = model.config
         _prepare_clip_encoder(model.encoder, cfg)
-        final_norm = getattr(
-            model, "final_layer_norm", getattr(model, "post_layernorm", None)
-        )
-        model.encoder._spyre_final_layer_norm = final_norm
         model._spyre_compiled_blocks = model.encoder._spyre_compiled_blocks
         if hasattr(model, "embeddings"):
             cpu_submods_bare = ["embeddings"]
             if hasattr(model, "pre_layrnorm"):
                 cpu_submods_bare.append("pre_layrnorm")
-                _patch_vision_transformer_forward(model)
+                _patch_vision_model_forward(model)
             if hasattr(model, "post_layernorm"):
                 cpu_submods_bare.append("post_layernorm")
             model._spyre_cpu_submodules = cpu_submods_bare
