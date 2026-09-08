@@ -53,7 +53,7 @@ import torch
 from transformers.modeling_outputs import BaseModelOutput
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, resolve_adapter_module
-from hf_adapters.hf_common import SpyreNoAdapterError, prefill_embed, prefill_encoder
+from hf_adapters.hf_common import prefill_embed, prefill_encoder
 
 
 def _to_cpu(t):
@@ -86,23 +86,8 @@ def _spyre_load_model(
     if dtype is None:
         dtype = model_kwargs.pop("torch_dtype", None)
 
-    try:
-        model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
-        adapter_module = resolve_adapter_module(model_name_or_path)
-    except SpyreNoAdapterError:
-        # Model has no Spyre adapter — fall back to the original (unpatched)
-        # SentenceTransformers loader. _original_load_model is a direct reference
-        # to the pre-patch method, so passing backend="spyre" here does not
-        # re-enter this hook.
-        return _original_load_model(
-            self,
-            model_name_or_path,
-            transformer_task,
-            config,
-            backend,
-            is_peft_model,
-            **model_kwargs,
-        )
+    model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
+    adapter_module = resolve_adapter_module(model_name_or_path)
 
     run_backbone_forward = adapter_module._run_backbone_forward
 
