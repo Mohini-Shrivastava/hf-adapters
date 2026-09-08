@@ -71,6 +71,7 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
+    GraniteSWAConfig,
     Lfm2Config,
     LlamaConfig,
     MistralConfig,
@@ -87,11 +88,6 @@ from transformers import (
     SmolLM3Config,
     XLMRobertaConfig,
 )
-
-try:
-    from transformers import GraniteSWAConfig  # type: ignore[attr-defined]
-except ImportError:
-    GraniteSWAConfig = None
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import (
     MaskedLMOutput,
@@ -166,7 +162,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
-    **({GraniteSWAConfig: hf_granite_swa} if GraniteSWAConfig is not None else {}),
+    GraniteSWAConfig: hf_granite_swa,
     Lfm2Config: hf_lfm2,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
@@ -316,24 +312,11 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config: PretrainedConfig | None = None
-    try:
-        model_config = AutoConfig.from_pretrained(
-            model_name_or_path, trust_remote_code=trust_remote_code
-        )
-    except Exception as exc:
-        # Check if the path is a sub-module repository like sentence-transformers
-        # e.g. sentence-transformers/clip-ViT-B-32 has subfolders like '0_CLIPModel'
-        if not isinstance(exc, (ValueError, EnvironmentError, OSError)):
-            raise
-        model_config = _autoconfig_with_subfolder_fallback(
-            model_name_or_path, trust_remote_code=trust_remote_code
-        )
-        if model_config is None:
-            raise SpyreNoAdapterError(
-                f"Could not load config for {model_name_or_path}: {exc}"
-            ) from exc
-    assert model_config is not None
+    model_config = _autoconfig_with_subfolder_fallback(
+        model_name_or_path, trust_remote_code=trust_remote_code
+    )
+    if model_config is None:
+        raise SpyreNoAdapterError(f"Could not load config for {model_name_or_path}")
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on

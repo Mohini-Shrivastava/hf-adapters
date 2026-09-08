@@ -227,11 +227,7 @@ def register():
     ``backend="spyre"``). Idempotent: calling ``register()`` more than once is safe.
     """
     from sentence_transformers import SentenceTransformer
-
-    try:
-        from sentence_transformers.base.modules.transformer import Transformer
-    except ImportError:
-        from sentence_transformers.models import Transformer
+    from sentence_transformers.base.modules.transformer import Transformer
 
     global _original_load_model, _original_init, _original_forward
 
